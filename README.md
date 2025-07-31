@@ -113,16 +113,27 @@ Before using the backtester, you need to configure your API credentials:
 ```
 algorithmic-trading-backtester/
 ├── README.md
-├── dema_sma_crossover_backtest.py
-├── dema_sma_visualization.py
-├── divergence_backtest.py
-├── divergence_visualization.py
-├── exceedence_backtest.py
-├── exceedence_visualization.py
-├── historical_data_handler.py
-├── connection_manager.py
+├── .gitignore
+├── backtesters/
+│   ├── dema_sma_crossover_backtest.py
+│   ├── divergence_backtest.py
+│   └── exceedence_backtest.py
+├── visualizers/
+│   ├── dema_sma_visualization.py
+│   ├── divergence_visualization.py
+│   └── exceedence_visualization.py
+├── handlers/
+│   ├── connection_manager.py
+│   ├── historical_data_handler.py
+│   └── fetch_data.py
+├── strategies/
+│   ├── dema_sma_crossover_strategy.py
+│   ├── exceedence_strategy.py
+│   ├── Divergence_calculator.py
+│   └── stock_divergence_calculator.py
 ├── charts/
-└── historical_data/
+├── historical_data/
+└── data/
 ```
 
 ## Usage
@@ -132,37 +143,37 @@ algorithmic-trading-backtester/
 #### DEMA-SMA Crossover Strategy
 ```bash
 # Basic backtest with default parameters
-python3 dema_sma_crossover_backtest.py AAPL
+python3 backtesters/dema_sma_crossover_backtest.py AAPL
 
 # Custom timeframe
-python3 dema_sma_crossover_backtest.py NVDA --period 10 --period-type day --frequency-type minute --frequency 5
+python3 backtesters/dema_sma_crossover_backtest.py NVDA --period 10 --period-type day --frequency-type minute --frequency 5
 
 # Custom lookback period
-python3 dema_sma_crossover_backtest.py TSLA --lookback 100
+python3 backtesters/dema_sma_crossover_backtest.py TSLA --lookback 100
 ```
 
 #### Divergence Strategy
 ```bash
 # Basic divergence backtest
-python3 divergence_backtest.py AAPL
+python3 backtesters/divergence_backtest.py AAPL
 
 # High-frequency analysis
-python3 divergence_backtest.py NVDA --period 5 --period-type day --frequency-type minute --frequency 15
+python3 backtesters/divergence_backtest.py NVDA --period 5 --period-type day --frequency-type minute --frequency 15
 
 # Custom divergence lookback
-python3 divergence_backtest.py TSLA --lookback 20
+python3 backtesters/divergence_backtest.py TSLA --lookback 20
 ```
 
 #### Exceedence Strategy
 ```bash
 # Basic volatility backtest
-python3 exceedence_backtest.py AAPL
+python3 backtesters/exceedence_backtest.py AAPL
 
 # Intraday volatility analysis
-python3 exceedence_backtest.py TSLA --period 5 --period-type day --frequency-type minute --frequency 30
+python3 backtesters/exceedence_backtest.py TSLA --period 5 --period-type day --frequency-type minute --frequency 30
 
 # Custom volatility lookback
-python3 exceedence_backtest.py NVDA --lookback 50
+python3 backtesters/exceedence_backtest.py NVDA --lookback 50
 ```
 
 ### Visualization Options
@@ -171,13 +182,13 @@ Each strategy includes comprehensive visualization capabilities:
 
 ```bash
 # Comprehensive analysis (automatic after backtest)
-python3 [strategy]_visualization.py historical_data/results.csv
+python3 visualizers/[strategy]_visualization.py historical_data/results.csv
 
 # Simple 3-panel view
-python3 [strategy]_visualization.py historical_data/results.csv --simple
+python3 visualizers/[strategy]_visualization.py historical_data/results.csv --simple
 
 # Save to custom location
-python3 [strategy]_visualization.py historical_data/results.csv --save charts/custom_analysis.png
+python3 visualizers/[strategy]_visualization.py historical_data/results.csv --save charts/custom_analysis.png
 ```
 
 ## Visualization Features
