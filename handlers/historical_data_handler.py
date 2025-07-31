@@ -2,8 +2,8 @@ import os
 import requests
 import pandas as pd
 import time
-from connection_manager import ensure_valid_tokens
 from datetime import datetime
+from .connection_manager import ensure_valid_tokens
 
 class HistoricalDataHandler:
     def __init__(self):
