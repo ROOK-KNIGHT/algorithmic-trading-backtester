@@ -40,9 +40,21 @@ Thumbs.db
 historical_data/*.csv
 data/*.csv
 
+# API tokens and credentials
+cs_tokens.json
+*.json
+!package.json
+!requirements.json
+
 # Logs
 *.log
 
 # Temporary files
 *.tmp
 *.temp
+
+# Configuration files with sensitive data
+config.py
+secrets.py
+.env
+</content>

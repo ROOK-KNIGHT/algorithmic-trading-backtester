@@ -93,6 +93,22 @@ pip install pandas numpy matplotlib scipy talib
 - `historical_data_handler.py` - Data fetching interface
 - `connection_manager.py` - API connection management
 
+### API Setup
+Before using the backtester, you need to configure your API credentials:
+
+1. **Schwab API Setup**:
+   - Register for a Schwab Developer Account at https://developer.schwab.com/
+   - Create a new application to get your APP_KEY and APP_SECRET
+   - Update `connection_manager.py` with your credentials:
+     ```python
+     APP_KEY = "YOUR_SCHWAB_APP_KEY_HERE"
+     APP_SECRET = "YOUR_SCHWAB_APP_SECRET_HERE"
+     ```
+
+2. **Token Management**:
+   - The system will automatically handle OAuth token refresh
+   - Tokens are stored locally in `cs_tokens.json` (excluded from git)
+
 ### Directory Structure
 ```
 algorithmic-trading-backtester/
