@@ -10,9 +10,12 @@ import argparse
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from historical_data_handler import HistoricalDataHandler
 import time
 import subprocess
+
+# Add parent directory to path to import from handlers
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from handlers.historical_data_handler import HistoricalDataHandler
 
 class DEMASMACrossoverBacktester:
     def __init__(self):
@@ -826,7 +829,7 @@ Examples:
             
             # Run the visualizer
             visualizer_cmd = [
-                "python3", "dema_sma_visualization.py", 
+                "python3", "visualizers/dema_sma_visualization.py", 
                 result, 
                 "--save", chart_filename
             ]

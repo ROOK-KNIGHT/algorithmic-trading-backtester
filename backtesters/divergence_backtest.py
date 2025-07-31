@@ -11,10 +11,13 @@ import pandas as pd
 import numpy as np
 import talib
 from datetime import datetime, timedelta
-from historical_data_handler import HistoricalDataHandler
 from scipy.signal import argrelextrema
 import time
 import subprocess
+
+# Add parent directory to path to import from handlers
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from handlers.historical_data_handler import HistoricalDataHandler
 
 class DivergenceBacktester:
     def __init__(self):
@@ -1290,7 +1293,7 @@ Examples:
             
             # Run the visualizer
             visualizer_cmd = [
-                "python3", "divergence_visualization.py", 
+                "python3", "visualizers/divergence_visualization.py", 
                 result, 
                 "--save", chart_filename
             ]
