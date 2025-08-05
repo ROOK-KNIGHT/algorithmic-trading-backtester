@@ -9,9 +9,22 @@ import os
 from datetime import timedelta, datetime
 import time
 
-# Configuration - Replace with your own API credentials
-APP_KEY = "YOUR_SCHWAB_APP_KEY_HERE"
-APP_SECRET = "YOUR_SCHWAB_APP_SECRET_HERE"
+# Load API credentials from external file
+def load_api_keys():
+    """Load API keys from the external KEYS.json file"""
+    keys_path = "/Users/isaac/Desktop/Projects/CS_KEYS/KEYS.json"
+    try:
+        with open(keys_path, 'r') as f:
+            keys = json.load(f)
+        return keys["APP_KEY"], keys["APP_SECRET"]
+    except Exception as e:
+        print(f"Error loading API keys from {keys_path}: {e}")
+        raise
+
+# Load keys
+APP_KEY, APP_SECRET = load_api_keys()
+
+# Configuration
 REDIRECT_URI = "https://127.0.0.1"
 AUTH_URL = f"https://api.schwabapi.com/v1/oauth/authorize?response_type=code&client_id={APP_KEY}&redirect_uri={REDIRECT_URI}&scope=readonly"
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"

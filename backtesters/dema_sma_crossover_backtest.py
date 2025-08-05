@@ -30,8 +30,8 @@ class DEMASMACrossoverBacktester:
         # Trading strategy parameters
         self.RISK_REWARD_RATIO = 2.0
         self.MAX_RISK_PERCENT = 2.0  # 2% risk per trade
-        self.STOP_LOSS_PERCENT = 1.5  # 1.5% stop loss
-        self.EARLY_TAKE_PROFIT_PERCENT = 0.5  # 0.5% early take profit
+        self.STOP_LOSS_PERCENT = 15  # 1.5% stop loss
+        self.EARLY_TAKE_PROFIT_PERCENT = 15  # 0.5% early take profit
         self.DISTANCE_STD_LOOKBACK = 20  # Lookback period for calculating distance standard deviation
         self.DISTANCE_STD_MULTIPLIER = 2.0  # Standard deviation multiplier for take profit
     
@@ -279,15 +279,48 @@ class DEMASMACrossoverBacktester:
                 if prev_distance is None:
                     prev_distance = current_distance
             
-            # Calculate entry and exit conditions based on strategy logic
-            # Long entry: DEMA < SMA AND distance is increasing (momentum building)
-            long_entry_condition = (current_dema < current_sma) and (prev_distance < current_distance)
+            # Define variable mapping for consistency
+            DEMA_Xc = current_dema  # Current DEMA value
+            SMA_Xo = current_sma    # Current SMA value
+            
+            # Calculate entry distance (DEMA - SMA)
+            entry_distance = DEMA_Xc - SMA_Xo  # Current entry distance
+            
+            # Get previous entry distance for comparison (entry_distance[5] represents 5 periods ago)
+            entry_distance_5_periods_ago = None
+            if i >= 3:
+                prev_bar_5 = df_with_indicators.iloc[i-3]
+                prev_dema_5 = prev_bar_5['dema']
+                prev_sma_5 = prev_bar_5['sma_open']
+                entry_distance_5_periods_ago = prev_dema_5 - prev_sma_5
+            
+            # Long entry: DEMA < SMA AND current entry distance < entry distance from 5 periods ago
+            if entry_distance_5_periods_ago is not None:
+                long_entry_condition = (DEMA_Xc < SMA_Xo) and (entry_distance_5_periods_ago < entry_distance)
+            else:
+                # Fallback to original condition if we don't have enough historical data
+                long_entry_condition = (current_dema < current_sma) and (prev_distance < current_distance)
             
             # Short entry: DEMA > SMA
             short_entry_condition = (current_dema > current_sma)
             
-            # Long exit: DEMA crosses below SMA (was above, now below)
-            long_exit_condition = (prev_dema >= prev_sma) and (current_dema < current_sma)
+            # Calculate exit distance (SMA - DEMA)
+            exit_distance = SMA_Xo - DEMA_Xc  # Current exit distance
+            
+            # Get previous exit distance for comparison (exit_distance[5] represents 5 periods ago)
+            exit_distance_5_periods_ago = None
+            if i >= 5:
+                prev_bar_5 = df_with_indicators.iloc[i-5]
+                prev_dema_5 = prev_bar_5['dema']
+                prev_sma_5 = prev_bar_5['sma_open']
+                exit_distance_5_periods_ago = prev_sma_5 - prev_dema_5
+            
+            # Long exit: DEMA > SMA AND current exit distance < exit distance from 5 periods ago
+            if exit_distance_5_periods_ago is not None:
+                long_exit_condition = (DEMA_Xc > SMA_Xo) and (exit_distance_5_periods_ago < exit_distance)
+            else:
+                # Fallback to original condition if we don't have enough historical data
+                long_exit_condition = (prev_dema >= prev_sma) and (current_dema < current_sma)
             
             # Short exit: SMA crosses above DEMA (SMA was below, now above)
             short_exit_condition = (prev_sma <= prev_dema) and (current_sma > current_dema)
