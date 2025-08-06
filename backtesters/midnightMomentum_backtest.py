@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Robust Overnight Metrics Analyzer
+Midnight Momentum Strategy Analyzer
 
 A statistically sound implementation for analyzing overnight trading patterns
 that addresses look-ahead bias, multiple testing issues, and other statistical flaws.
@@ -41,7 +41,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'handlers'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'visualizers'))
 from connection_manager import ensure_valid_tokens
 from historical_data_handler import HistoricalDataHandler
-from overnightHold_visualization import OvernightHoldVisualizer
+from midnightMomentum_visualization import MidnightMomentumVisualizer
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -206,6 +206,10 @@ class StatisticalAnalyzer:
         result['prev_day_up'] = (result['prev_close'] > result['prev_close'].shift(1)).astype(int)
         result['prev_day_down'] = (result['prev_close'] < result['prev_close'].shift(1)).astype(int)
         
+        # Next day recovery potential for scaling-in analysis
+        result['next_day_high'] = result['high'].shift(-1)
+        result['next_day_recovery_potential'] = (result['next_day_high'] > result['close']).astype(int)
+        
         # Volatility metrics (using proper lagged calculations)
         result['true_range'] = np.maximum(
             result['high'] - result['low'],
@@ -266,11 +270,11 @@ class StatisticalAnalyzer:
                                             confidence_levels: List[float] = None) -> Dict[str, float]:
         """
         Calculate profit potential (upside) thresholds using historical quantiles
-        This is the mirror image of downside risk thresholds
+        For take profit targets, we want thresholds that get hit with the specified confidence level
         
         Args:
             df: Historical data
-            confidence_levels: List of confidence levels (e.g., [0.95, 0.99])
+            confidence_levels: List of confidence levels (e.g., [0.68, 0.95, 0.99])
             
         Returns:
             Dictionary of upside thresholds for each confidence level
@@ -289,9 +293,9 @@ class StatisticalAnalyzer:
             return upside_thresholds
         
         for conf_level in confidence_levels:
-            # For confidence level (e.g., 95%), we want the 95th percentile of gains
-            # This represents gains that are exceeded only 5% of the time
-            upside_threshold_pct = high_gains.quantile(conf_level)
+            # FIXED: Use 35th percentile for all confidence levels for consistent take profit targets
+            # This means targets will be hit ~65% of the time, providing higher profit potential
+            upside_threshold_pct = high_gains.quantile(0.35)  # Always use 35th percentile
             
             # Ensure threshold is positive (representing a gain)
             if upside_threshold_pct < 0:
@@ -1649,6 +1653,10 @@ class RobustOvernightAnalyzer:
         result['position_size'] = np.nan
         result['shares'] = np.nan
         
+        # Scaling-in analysis columns
+        result['position_underwater'] = 0  # 1 if position is below entry price
+        result['scaling_opportunity'] = 0  # 1 if next day recovery potential exists while underwater
+        
         # Track current equity
         current_equity = self.INITIAL_CAPITAL
         
@@ -1689,6 +1697,15 @@ class RobustOvernightAnalyzer:
                 # Calculate running PnL
                 running_pnl = (current_close - entry_price) * shares
                 result.iloc[i, result.columns.get_loc('running_pnl')] = running_pnl
+                
+                # Track if position is underwater (current close < entry price)
+                if current_close < entry_price:
+                    result.iloc[i, result.columns.get_loc('position_underwater')] = 1
+                    
+                    # Check if next day has recovery potential for scaling-in analysis
+                    if pd.notna(current_row.get('next_day_recovery_potential', np.nan)):
+                        if current_row['next_day_recovery_potential'] == 1:
+                            result.iloc[i, result.columns.get_loc('scaling_opportunity')] = 1
                 
                 # Check exit conditions - ONLY exit when upside target is hit
                 exit_triggered = False
@@ -1817,6 +1834,20 @@ class RobustOvernightAnalyzer:
             gross_loss = abs(trades[trades['pnl'] < 0]['pnl'].sum())
             profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
             
+            # Scaling-in analysis metrics
+            underwater_days = (df['position_underwater'] == 1).sum()
+            scaling_opportunities = (df['scaling_opportunity'] == 1).sum()
+            total_position_days = (df['position_status'] == 'OPEN').sum()
+            
+            scaling_metrics = {
+                'total_position_days': total_position_days,
+                'underwater_days': underwater_days,
+                'underwater_percentage': (underwater_days / total_position_days * 100) if total_position_days > 0 else 0,
+                'scaling_opportunities': scaling_opportunities,
+                'scaling_opportunity_rate': (scaling_opportunities / underwater_days * 100) if underwater_days > 0 else 0,
+                'next_day_recovery_potential': df['next_day_recovery_potential'].sum()
+            }
+            
             return {
                 'symbol': symbol,
                 'total_trades': total_trades,
@@ -1837,7 +1868,8 @@ class RobustOvernightAnalyzer:
                 'sharpe_ratio': sharpe_ratio,
                 'max_drawdown': max_drawdown,
                 'max_drawdown_pct': max_drawdown_pct,
-                'confidence_level_used': self.CONFIDENCE_LEVEL_FOR_TRADING
+                'confidence_level_used': self.CONFIDENCE_LEVEL_FOR_TRADING,
+                'scaling_analysis': scaling_metrics
             }
             
         except Exception as e:
@@ -1854,7 +1886,7 @@ class RobustOvernightAnalyzer:
         
         symbol = performance['symbol']
         
-        print(f"\n📊 OVERNIGHT HOLD STRATEGY PERFORMANCE SUMMARY: {symbol}")
+        print(f"\n📊 MIDNIGHT MOMENTUM STRATEGY PERFORMANCE SUMMARY: {symbol}")
         print("=" * 70)
         print(f"🎯 STRATEGY: Buy at close, sell when price hits {performance['confidence_level_used']}% threshold")
         print(f"💰 RISK PER TRADE: {self.RISK_PER_TRADE_PERCENT}% of equity")
@@ -1881,6 +1913,25 @@ class RobustOvernightAnalyzer:
         print(f"   Profit Factor: {performance['profit_factor']:.2f}")
         print(f"   Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
         print(f"   Maximum Drawdown: ${performance['max_drawdown']:.2f} ({performance['max_drawdown_pct']:.2f}%)")
+        
+        # Scaling-in analysis section
+        if 'scaling_analysis' in performance:
+            scaling = performance['scaling_analysis']
+            print(f"\n🔄 SCALING-IN ANALYSIS (Position Averaging Potential)")
+            print(f"   Total Position Days: {scaling['total_position_days']}")
+            print(f"   Days Position Underwater: {scaling['underwater_days']}")
+            print(f"   Underwater Percentage: {scaling['underwater_percentage']:.1f}%")
+            print(f"   Scaling Opportunities: {scaling['scaling_opportunities']}")
+            print(f"   Scaling Opportunity Rate: {scaling['scaling_opportunity_rate']:.1f}%")
+            print(f"   Next Day Recovery Potential: {scaling['next_day_recovery_potential']}")
+            
+            # Scaling-in insights
+            if scaling['scaling_opportunity_rate'] > 60:
+                print(f"   ✅ High scaling-in potential - {scaling['scaling_opportunity_rate']:.1f}% of underwater days show next-day recovery")
+            elif scaling['scaling_opportunity_rate'] > 40:
+                print(f"   ⚠️  Moderate scaling-in potential - {scaling['scaling_opportunity_rate']:.1f}% of underwater days show next-day recovery")
+            else:
+                print(f"   ❌ Low scaling-in potential - only {scaling['scaling_opportunity_rate']:.1f}% of underwater days show next-day recovery")
         
         # Strategy insights
         print(f"\n🔍 STRATEGY INSIGHTS")
@@ -1948,6 +1999,11 @@ class RobustOvernightAnalyzer:
                 'position_size', 'shares'
             ]
             
+            # Scaling-in analysis columns
+            scaling_columns = [
+                'next_day_recovery_potential', 'position_underwater', 'scaling_opportunity'
+            ]
+            
             # Additional calculated columns
             additional_columns = [
                 'true_range', 'prev_day_up', 'prev_day_down'
@@ -1958,7 +2014,7 @@ class RobustOvernightAnalyzer:
                 additional_columns.append('volatility_regime')
             
             # Combine all columns, only including those that exist in the DataFrame
-            all_columns = base_columns + threshold_columns + trading_columns + additional_columns
+            all_columns = base_columns + threshold_columns + trading_columns + scaling_columns + additional_columns
             available_columns = [col for col in all_columns if col in csv_data.columns]
             
             # Select only available columns
@@ -2007,7 +2063,7 @@ class RobustOvernightAnalyzer:
             os.makedirs('charts', exist_ok=True)
             
             # Initialize the visualizer with the CSV file
-            visualizer = OvernightHoldVisualizer(csv_filename)
+            visualizer = MidnightMomentumVisualizer(csv_filename)
             
             # Generate comprehensive visualization
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

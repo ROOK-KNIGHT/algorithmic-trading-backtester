@@ -3,7 +3,8 @@ import requests
 import pandas as pd
 import time
 from datetime import datetime
-from connection_manager import ensure_valid_tokens
+from typing import Dict, Any
+from .connection_manager import ensure_valid_tokens
 
 class HistoricalDataHandler:
     def __init__(self):
@@ -168,3 +169,43 @@ class HistoricalDataHandler:
         key=lambda x: x['volume'], 
         reverse=True
     )[:5]
+
+    def get_quote(self, symbol: str) -> Dict[str, Any]:
+        
+        """
+        Get real-time quote for a symbol
+        
+        Parameters:
+            symbol: The stock symbol to get quote for
+            
+        Returns:
+            Dictionary containing quote information
+        """
+        url = f"https://api.schwabapi.com/marketdata/v1/quotes?symbols={symbol}"
+        headers = self._get_auth_headers()
+        
+        try:
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                quote_data = response.json()
+                
+                if 'quotes' in quote_data and quote_data['quotes']:
+                    quote = quote_data['quotes'][0]
+                    return {
+                        "symbol": quote.get('symbol'),
+                        "lastPrice": quote.get('lastPrice'),
+                        "askPrice": quote.get('askPrice'),
+                        "bidPrice": quote.get('bidPrice'),
+                        "lastTradeTime": quote.get('tradeTime')
+                    }
+                else:
+                    return {"error": "No quote data found"}
+            else:
+                error_message = f"Failed to retrieve quote: {response.status_code}, {response.text}"
+                print(error_message)
+                return {"error": error_message}
+        except Exception as e:
+            error_message = f"Error retrieving quote: {str(e)}"
+            print(error_message)
+            return {"error": error_message}

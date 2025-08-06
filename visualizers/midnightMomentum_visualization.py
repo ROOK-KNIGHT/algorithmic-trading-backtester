@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Visualization script for Overnight Hold Backtest Results
+Visualization script for Midnight Momentum Strategy Results
 Creates comprehensive charts showing price action, thresholds, signals, and performance
 """
 
@@ -14,7 +14,7 @@ import argparse
 import os
 from matplotlib.patches import Rectangle
 
-class OvernightHoldVisualizer:
+class MidnightMomentumVisualizer:
     def __init__(self, csv_file_path):
         """Initialize the visualizer with backtest results"""
         self.csv_file_path = csv_file_path
@@ -256,7 +256,7 @@ class OvernightHoldVisualizer:
                               alpha=0.6, zorder=8, 
                               label=f'{level}% Upside Hit' if level == '95' else "")
         
-        ax.set_title(f'{self.symbol} - Overnight Hold Strategy', fontsize=14, fontweight='bold')
+        ax.set_title(f'{self.symbol} - Midnight Momentum Strategy', fontsize=14, fontweight='bold')
         ax.set_ylabel('Price ($)', fontsize=12)
         ax.legend(loc='upper left', fontsize=9, ncol=2)
         ax.grid(True, alpha=0.3)
@@ -574,7 +574,7 @@ Gross Loss: ${metrics['gross_loss']:.2f}
         self.create_recovery_analysis(ax7)
         
         # Add overall title
-        fig.suptitle(f'Overnight Hold Strategy Analysis - {self.symbol}', 
+        fig.suptitle(f'Midnight Momentum Strategy Analysis - {self.symbol}', 
                     fontsize=16, fontweight='bold', y=0.98)
         
         # Adjust layout
@@ -603,7 +603,7 @@ Gross Loss: ${metrics['gross_loss']:.2f}
         self.create_equity_curve(ax3)
         
         # Add overall title
-        fig.suptitle(f'Overnight Hold Strategy - {self.symbol}', 
+        fig.suptitle(f'Midnight Momentum Strategy - {self.symbol}', 
                     fontsize=14, fontweight='bold')
         
         plt.tight_layout()
