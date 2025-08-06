@@ -40,6 +40,7 @@ from typing import Dict, Any, List, Optional, Tuple
 # Add parent directory to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from handlers.historical_data_handler import HistoricalDataHandler
+from visualizers.emaAccumulation_visualization import EMAAccumulationVisualizer
 
 # Set up plotting style
 plt.style.use('default')
@@ -384,15 +385,32 @@ class EMAAccumulationBacktester:
         buy_signals = df[df['signal'] == 'BUY']
         sell_signals = df[df['signal'] == 'SELL']
         
-        # Calculate average shares accumulated per position
+        # Calculate position sizes for each completed trade
         position_sizes = []
+        max_position_sizes = []
+        
+        # For each sell signal, find the maximum position size during that position period
         for sell_idx in sell_signals.index:
-            position_size = df.loc[sell_idx, 'position_shares']
-            if position_size > 0:
-                position_sizes.append(position_size)
+            # Look backwards from sell signal to find when position started
+            position_start_idx = None
+            for i in range(sell_idx - 1, -1, -1):
+                if i == 0 or df.iloc[i-1]['position_shares'] == 0:
+                    position_start_idx = i
+                    break
+            
+            if position_start_idx is not None:
+                # Get the maximum position size during this position period
+                position_period = df.iloc[position_start_idx:sell_idx+1]
+                max_pos_size = position_period['position_shares'].max()
+                if max_pos_size > 0:
+                    max_position_sizes.append(max_pos_size)
+                    position_sizes.append(max_pos_size)  # For backward compatibility
+        
+        # Also get the overall maximum position size from the entire dataset
+        overall_max_position = df['position_shares'].max()
         
         avg_position_size = np.mean(position_sizes) if position_sizes else 0
-        max_position_size = np.max(position_sizes) if position_sizes else 0
+        max_position_size = overall_max_position if overall_max_position > 0 else 0
         
         # Calculate average holding periods (in 1-minute bars)
         holding_periods = []
@@ -761,7 +779,46 @@ Total Bars: {summary['data_period']['total_bars']:,}
         print("🎨 Creating performance visualization...")
         chart_path = self.create_performance_visualization(df, summary, symbol)
         
+        # Generate automatic visualizations using the dedicated visualizer
+        if csv_path:
+            self._generate_automatic_visualizations(csv_path, symbol)
+        
         return df, summary, csv_path, chart_path
+    
+    def _generate_automatic_visualizations(self, csv_filename: str, symbol: str):
+        """
+        Automatically generate visualizations after saving CSV data
+        
+        Args:
+            csv_filename: Path to the saved CSV file
+            symbol: Stock symbol
+        """
+        try:
+            print(f"\n🎨 Generating automatic visualizations for {symbol}...")
+            
+            # Initialize the visualizer with the CSV file
+            visualizer = EMAAccumulationVisualizer(csv_filename)
+            
+            # Generate comprehensive visualization
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            comprehensive_chart_path = f'charts/{symbol}_emaAccumulation_comprehensive_visualization.png'
+            
+            print(f"   📊 Creating comprehensive visualization...")
+            visualizer.create_comprehensive_visualization(save_path=comprehensive_chart_path)
+            
+            # Generate simple visualization
+            simple_chart_path = f'charts/{symbol}_emaAccumulation_simple_visualization.png'
+            
+            print(f"   📈 Creating simple visualization...")
+            visualizer.create_simple_chart(save_path=simple_chart_path)
+            
+            print(f"✅ Visualizations completed successfully!")
+            print(f"   📊 Comprehensive chart: {comprehensive_chart_path}")
+            print(f"   📈 Simple chart: {simple_chart_path}")
+            
+        except Exception as e:
+            print(f"⚠️  Warning: Could not generate automatic visualizations: {str(e)}")
+            print(f"   You can manually run: python3 visualizers/emaAccumulation_visualization.py {csv_filename}")
 
 
 def main():
