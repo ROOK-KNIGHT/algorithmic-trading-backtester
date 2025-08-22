@@ -43,7 +43,6 @@ from handlers.connection_manager import ensure_valid_tokens
 from handlers.historical_data_handler import HistoricalDataHandler
 from handlers.order_handler import OrderHandler
 
-
 class EMAAccumulationStrategy:
     """
     EMA Accumulation Live Trading Strategy class for real-time market operations.
@@ -162,7 +161,7 @@ class EMAAccumulationStrategy:
                 'next_event': next_event,
                 'minutes_until_event': int(time_until_event.total_seconds() / 60)
             }
-            
+        
         except Exception as e:
             self.logger.error(f"Error checking trading hours: {e}")
             return {
@@ -209,13 +208,6 @@ class EMAAccumulationStrategy:
             df['datetime'] = pd.to_datetime(df['datetime'])
             df = df.sort_values('datetime').reset_index(drop=True)
             
-            # Filter to trading hours only
-            df = self.filter_trading_hours(df)
-            
-            if df.empty:
-                self.logger.warning(f"No trading hours data for {self.symbol}")
-                return False
-            
             # Keep only the most recent data points for EMA calculation
             self.price_data = df.tail(lookback_periods).copy()
             self.last_update_time = datetime.now()
@@ -226,50 +218,6 @@ class EMAAccumulationStrategy:
         except Exception as e:
             self.logger.error(f"Error fetching real-time data: {e}")
             return False
-    
-    def filter_trading_hours(self, df):
-        """
-        Filter data to include only regular trading hours.
-        
-        Args:
-            df (pd.DataFrame): Raw OHLCV data
-            
-        Returns:
-            pd.DataFrame: Filtered data for trading hours only
-        """
-        if df.empty:
-            return df
-        
-        try:
-            # Convert to Eastern timezone
-            df_copy = df.copy()
-            
-            if df_copy['datetime'].dt.tz is None:
-                df_copy['datetime_et'] = df_copy['datetime'].dt.tz_localize('UTC').dt.tz_convert('US/Eastern')
-            else:
-                df_copy['datetime_et'] = df_copy['datetime'].dt.tz_convert('US/Eastern')
-            
-            # Extract hour and minute
-            df_copy['hour'] = df_copy['datetime_et'].dt.hour
-            df_copy['minute'] = df_copy['datetime_et'].dt.minute
-            
-            # Filter for trading hours (9:30 AM - 4:00 PM ET)
-            trading_hours_mask = (
-                ((df_copy['hour'] == 9) & (df_copy['minute'] >= 30)) |
-                ((df_copy['hour'] >= 10) & (df_copy['hour'] < 16))
-            )
-            
-            filtered_df = df_copy[trading_hours_mask].copy()
-            
-            # Remove temporary columns
-            if 'datetime_et' in filtered_df.columns:
-                filtered_df = filtered_df.drop(['datetime_et', 'hour', 'minute'], axis=1)
-            
-            return filtered_df.reset_index(drop=True)
-            
-        except Exception as e:
-            self.logger.error(f"Error filtering trading hours: {e}")
-            return df
     
     def calculate_ema(self):
         """
@@ -453,7 +401,7 @@ class EMAAccumulationStrategy:
     
     def execute_buy_signal(self):
         """
-        Execute a buy order for 1 share.
+        Execute a buy order for 1 share using the properly aligned order handler.
         
         Returns:
             dict: Order execution result
@@ -464,13 +412,14 @@ class EMAAccumulationStrategy:
             
             current_price = self.get_current_price()
             
-            self.logger.info(f"Executing BUY order: 1 share of {self.symbol} at ~${current_price:.2f}")
+            self.logger.info(f"Executing BUY market order: 1 share of {self.symbol}")
             
-            # Place market buy order for 1 share
-            order_result = self.order_handler.buy_market(
+            # Place market buy order for 1 share using the aligned order handler
+            order_result = self.order_handler.place_market_order(
+                action_type="BUY",
                 symbol=self.symbol,
                 shares=1,
-                current_price=current_price
+                timestamp=datetime.now()
             )
             
             if order_result['status'] == 'submitted':
@@ -502,7 +451,7 @@ class EMAAccumulationStrategy:
     
     def execute_sell_signal(self):
         """
-        Execute a sell order for entire position.
+        Execute a sell order for entire position using the properly aligned order handler.
         
         Returns:
             dict: Order execution result
@@ -519,13 +468,14 @@ class EMAAccumulationStrategy:
             
             current_price = self.get_current_price()
             
-            self.logger.info(f"Executing SELL order: {self.current_position} shares of {self.symbol} at ~${current_price:.2f}")
+            self.logger.info(f"Executing SELL market order: {self.current_position} shares of {self.symbol}")
             
-            # Place market sell order for entire position
-            order_result = self.order_handler.sell_market(
+            # Place market sell order for entire position using the aligned order handler
+            order_result = self.order_handler.place_market_order(
+                action_type="SELL",
                 symbol=self.symbol,
                 shares=self.current_position,
-                current_price=current_price
+                timestamp=datetime.now()
             )
             
             if order_result['status'] == 'submitted':

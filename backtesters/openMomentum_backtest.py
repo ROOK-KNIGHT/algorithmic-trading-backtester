@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-EMA Accumulation Backtester
+Open Momentum Backtester
 
-A comprehensive backtesting system for the EMA Accumulation strategy that operates on 1-minute data.
-The strategy accumulates shares when price is below the 21-EMA and exits at 0.5% profit from average entry price.
+A comprehensive backtesting system for the Open Momentum strategy that operates on 5-minute data.
+The strategy buys when current open > previous open and sells when current open < previous open.
 
 Key Features:
-- 1-minute intraday accumulation analysis
+- 5-minute intraday momentum analysis
 - Regular trading hours filtering (9:30 AM - 4:00 PM ET)
-- Rolling average position price tracking
-- Rolling PnL tracking since position opened
 - Comprehensive performance metrics
 - CSV output with full trade history
 - Automatic visualization generation
 
 Strategy Logic:
-- Entry: Buy 1 share every minute when current_price < 21-period EMA
-- Exit: Sell entire position when current_price >= (average_entry_price * 1.005) - 0.5% profit target
-- No stop loss
-- Accumulation: Continuously add shares while price remains below EMA
-- Position tracking: Track rolling average entry price and unrealized PnL
+- Entry: Buy when current_5min_open > previous_5min_open AND price > 21-period EMA
+- Exit: Sell after 5 minutes (1 bar) - time-based exit only
+- EMA Filter: Only enter positions when price is above the 21-period EMA (trend filter)
+- Time-based exit: Maximum hold time of 5 minutes
+- Position sizing: 10% of current equity per trade
 
 Author: Trading System
 Date: 2025-01-06
@@ -40,30 +38,27 @@ from typing import Dict, Any, List, Optional, Tuple
 # Add parent directory to path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from handlers.historical_data_handler import HistoricalDataHandler
-from visualizers.emaAccumulation_visualization import EMAAccumulationVisualizer
 
 # Set up plotting style
 plt.style.use('default')
 sns.set_palette("husl")
 
 
-class EMAAccumulationBacktester:
+class OpenMomentumBacktester:
     """
-    EMA Accumulation Strategy Backtester for 1-minute data
+    Open Momentum Strategy Backtester for 5-minute data
     """
     
-    def __init__(self, initial_capital=25000.0, ema_period=21, profit_target=0.005):
+    def __init__(self, initial_capital=25000.0, position_size_pct=10.0):
         """
-        Initialize the EMA Accumulation Backtester
+        Initialize the Open Momentum Backtester
         
         Args:
             initial_capital (float): Starting capital amount
-            ema_period (int): EMA period for trend filter
-            profit_target (float): Profit target as decimal (0.005 = 0.5%)
+            position_size_pct (float): Percentage of equity to use per trade
         """
         self.initial_capital = initial_capital
-        self.ema_period = ema_period
-        self.profit_target = profit_target
+        self.position_size_pct = position_size_pct / 100.0  # Convert to decimal
         self.data_handler = HistoricalDataHandler()
         
         # Create output directories
@@ -72,16 +67,16 @@ class EMAAccumulationBacktester:
         os.makedirs(self.output_dir, exist_ok=True)
         os.makedirs(self.charts_dir, exist_ok=True)
         
-    def fetch_data(self, symbol, period_type="day", period=10, frequency_type="minute", frequency=1):
+    def fetch_data(self, symbol, period_type="day", period=10, frequency_type="minute", frequency=5):
         """
-        Fetch 1-minute historical data for the symbol
+        Fetch 5-minute historical data for the symbol
         
         Args:
             symbol (str): Stock symbol
-            period_type (str): Period type ('day', 'month', 'year') - For 1-min data, must be 'day'
+            period_type (str): Period type ('day', 'month', 'year') - For 5-min data, must be 'day'
             period (int): Number of periods - For 'day': 1, 2, 3, 4, 5, 10
-            frequency_type (str): Frequency type ('minute', 'daily', etc.) - For 1-min data, must be 'minute'
-            frequency (int): Frequency value (1 for 1-minute bars) - Valid: 1, 5, 10, 15, 30
+            frequency_type (str): Frequency type ('minute', 'daily', etc.) - For 5-min data, must be 'minute'
+            frequency (int): Frequency value (5 for 5-minute bars) - Valid: 1, 5, 10, 15, 30
             
         Returns:
             pd.DataFrame: Historical OHLCV data
@@ -99,7 +94,7 @@ class EMAAccumulationBacktester:
             if frequency_type == "minute" and frequency not in [1, 5, 10, 15, 30]:
                 print(f"⚠️  Warning: For frequencyType='minute', frequency must be 1,5,10,15,30. Using {frequency}")
             
-            print(f"Fetching 1-minute data for {symbol}...")
+            print(f"Fetching 5-minute data for {symbol}...")
             print(f"API Parameters: periodType={period_type}, period={period}, frequencyType={frequency_type}, frequency={frequency}")
             
             # Fetch data using existing handler
@@ -129,7 +124,7 @@ class EMAAccumulationBacktester:
             # Add symbol column
             df['symbol'] = symbol
             
-            print(f"Successfully fetched {len(df)} 1-minute bars for {symbol}")
+            print(f"Successfully fetched {len(df)} 5-minute bars for {symbol}")
             print(f"Date range: {df['datetime'].iloc[0]} to {df['datetime'].iloc[-1]}")
             
             return df
@@ -202,7 +197,7 @@ class EMAAccumulationBacktester:
     
     def calculate_signals_and_performance(self, df):
         """
-        Calculate EMA Accumulation signals and performance metrics
+        Calculate Open Momentum signals and performance metrics
         
         Args:
             df (pd.DataFrame): OHLCV data
@@ -210,102 +205,110 @@ class EMAAccumulationBacktester:
         Returns:
             pd.DataFrame: Data with signals and performance metrics added
         """
-        if df.empty or len(df) < self.ema_period:
+        if df.empty or len(df) < 2:
             return df
         
         result = df.copy()
         
-        # Calculate EMA
-        result['ema_21'] = result['close'].ewm(span=self.ema_period, adjust=False).mean()
+        # Calculate previous open
+        result['prev_open'] = result['open'].shift(1)
         
-        # Initialize tracking columns
+        # Calculate open momentum
+        result['open_momentum'] = result['open'] - result['prev_open']
+        
+        # Calculate 21-period EMA
+        result['ema_21'] = result['close'].ewm(span=21, adjust=False).mean()
+        
+        # Initialize signal and position tracking columns
         result['signal'] = None
-        result['position_shares'] = 0  # Current position size in shares
-        result['avg_entry_price'] = np.nan  # Rolling average entry price
-        result['total_cost'] = 0.0  # Total cost basis of position
-        result['position_value'] = 0.0  # Current market value of position
-        result['unrealized_pnl'] = 0.0  # Unrealized P&L since position opened
-        result['rolling_pnl'] = 0.0  # Rolling P&L since position was opened
-        result['trade_pnl'] = np.nan  # Realized P&L when position is closed
-        result['cumulative_pnl'] = 0.0  # Cumulative realized P&L
-        result['equity'] = self.initial_capital  # Current equity
-        result['cash'] = self.initial_capital  # Available cash
+        result['position'] = 0  # 0 = flat, 1 = long
+        result['entry_price'] = np.nan
+        result['exit_price'] = np.nan
+        result['trade_pnl'] = np.nan
+        result['cumulative_pnl'] = 0.0
+        result['equity'] = self.initial_capital
+        result['shares'] = np.nan
+        result['position_value'] = np.nan
+        result['unrealized_pnl'] = np.nan
         
         # Track current state
-        current_shares = 0
-        total_cost = 0.0
-        avg_entry_price = 0.0
+        current_equity = self.initial_capital
+        current_position = 0
+        entry_price = None
+        entry_bar_index = None  # Track when position was opened
+        shares = 0
         cumulative_pnl = 0.0
-        current_cash = self.initial_capital
-        position_start_pnl = 0.0  # Track PnL from when position was first opened
         
-        for i in range(self.ema_period, len(result)):  # Start after EMA calculation period
-            current_price = result.iloc[i]['close']
-            current_ema = result.iloc[i]['ema_21']
+        for i in range(1, len(result)):  # Start from index 1 since we need previous open
+            current_open = result.iloc[i]['open']
+            prev_open = result.iloc[i]['prev_open']
+            close_price = result.iloc[i]['close']
+            prev_close = result.iloc[i - 1]['close'] 
             
-            if pd.isna(current_ema):
+            if pd.isna(prev_open):
+                # Update running totals even if no signal
+                result.iloc[i, result.columns.get_loc('cumulative_pnl')] = cumulative_pnl
+                result.iloc[i, result.columns.get_loc('equity')] = current_equity
+                result.iloc[i, result.columns.get_loc('position')] = current_position
                 continue
             
             signal = None
             
-            # Strategy Logic: Buy 1 share when price < EMA, Sell all when profit target hit
-            if current_price < current_ema and current_cash >= current_price:
-                # BUY SIGNAL: Accumulate 1 share
+            # Get current EMA value
+            current_ema = result.iloc[i]['ema_21']
+            
+            # Signal logic with EMA filter
+            if (current_open > prev_close and 
+                current_position == 0 and 
+                pd.notna(current_ema) and 
+                current_open > current_ema):
+                # Buy signal - enter long position (price above EMA)
                 signal = 'BUY'
-                shares_to_buy = 1
-                cost = shares_to_buy * current_price
+                current_position = 1
+                entry_price = current_open
+                entry_bar_index = i  # Track when position was opened
+                position_size = current_equity * self.position_size_pct
+                shares = position_size / entry_price
                 
-                # Check if this is the start of a new position
-                if current_shares == 0:
-                    position_start_pnl = cumulative_pnl  # Reset rolling PnL tracker
+                result.iloc[i, result.columns.get_loc('entry_price')] = entry_price
+                result.iloc[i, result.columns.get_loc('shares')] = shares
                 
-                # Update position
-                current_shares += shares_to_buy
-                total_cost += cost
-                current_cash -= cost
-                avg_entry_price = total_cost / current_shares
+            elif current_position == 1 and entry_bar_index is not None:
+                # Check exit conditions for open position
+                bars_held = i - entry_bar_index
                 
-            elif current_shares > 0:
-                # Check exit condition: 0.5% profit from average entry price
-                profit_target_price = avg_entry_price * (1 + self.profit_target)
-                
-                if current_price >= profit_target_price:
-                    # SELL SIGNAL: Exit entire position
+                # Exit condition: Time-based exit after 1 bar (5 minutes)
+                if bars_held >= 6:
+                    # Sell signal - exit long position
                     signal = 'SELL'
+                    current_position = 0
+                    exit_price = close_price
                     
-                    # Calculate trade P&L
-                    position_value = current_shares * current_price
-                    trade_pnl = position_value - total_cost
-                    cumulative_pnl += trade_pnl
-                    current_cash += position_value
-                    
-                    result.iloc[i, result.columns.get_loc('trade_pnl')] = trade_pnl
+                    if entry_price is not None and shares > 0:
+                        trade_pnl = (exit_price - entry_price) * shares
+                        cumulative_pnl += trade_pnl
+                        current_equity += trade_pnl
+                        
+                        result.iloc[i, result.columns.get_loc('exit_price')] = exit_price
+                        result.iloc[i, result.columns.get_loc('trade_pnl')] = trade_pnl
                     
                     # Reset position
-                    current_shares = 0
-                    total_cost = 0.0
-                    avg_entry_price = 0.0
+                    entry_price = None
+                    entry_bar_index = None
+                    shares = 0
             
-            # Update all tracking columns
+            # Update columns
             result.iloc[i, result.columns.get_loc('signal')] = signal
-            result.iloc[i, result.columns.get_loc('position_shares')] = current_shares
-            result.iloc[i, result.columns.get_loc('total_cost')] = total_cost
-            result.iloc[i, result.columns.get_loc('cash')] = current_cash
+            result.iloc[i, result.columns.get_loc('position')] = current_position
             result.iloc[i, result.columns.get_loc('cumulative_pnl')] = cumulative_pnl
+            result.iloc[i, result.columns.get_loc('equity')] = current_equity
             
-            if current_shares > 0:
-                result.iloc[i, result.columns.get_loc('avg_entry_price')] = avg_entry_price
-                position_value = current_shares * current_price
-                unrealized_pnl = position_value - total_cost
-                rolling_pnl = cumulative_pnl - position_start_pnl + unrealized_pnl
-                
+            # Calculate current position value and unrealized P&L for open positions
+            if current_position == 1 and entry_price is not None and shares > 0:
+                position_value = shares * close_price
+                unrealized_pnl = (close_price - entry_price) * shares
                 result.iloc[i, result.columns.get_loc('position_value')] = position_value
                 result.iloc[i, result.columns.get_loc('unrealized_pnl')] = unrealized_pnl
-                result.iloc[i, result.columns.get_loc('rolling_pnl')] = rolling_pnl
-            
-            # Update equity (cash + position value)
-            current_equity = current_cash + (current_shares * current_price)
-            result.iloc[i, result.columns.get_loc('equity')] = current_equity
         
         return result
     
@@ -381,47 +384,22 @@ class EMAAccumulationBacktester:
             max_drawdown = 0
             max_drawdown_pct = 0
         
-        # Calculate accumulation statistics
-        buy_signals = df[df['signal'] == 'BUY']
-        sell_signals = df[df['signal'] == 'SELL']
+        # Calculate holding periods (in 5-minute bars)
+        buy_signals = df[df['signal'] == 'BUY'].index
+        sell_signals = df[df['signal'] == 'SELL'].index
         
-        # Calculate position sizes for each completed trade
-        position_sizes = []
-        max_position_sizes = []
-        
-        # For each sell signal, find the maximum position size during that position period
-        for sell_idx in sell_signals.index:
-            # Look backwards from sell signal to find when position started
-            position_start_idx = None
-            for i in range(sell_idx - 1, -1, -1):
-                if i == 0 or df.iloc[i-1]['position_shares'] == 0:
-                    position_start_idx = i
+        holding_periods = []
+        for sell_idx in sell_signals:
+            # Find the most recent buy signal before this sell
+            buy_idx = None
+            for buy in reversed(buy_signals):
+                if buy < sell_idx:
+                    buy_idx = buy
                     break
             
-            if position_start_idx is not None:
-                # Get the maximum position size during this position period
-                position_period = df.iloc[position_start_idx:sell_idx+1]
-                max_pos_size = position_period['position_shares'].max()
-                if max_pos_size > 0:
-                    max_position_sizes.append(max_pos_size)
-                    position_sizes.append(max_pos_size)  # For backward compatibility
-        
-        # Also get the overall maximum position size from the entire dataset
-        overall_max_position = df['position_shares'].max()
-        
-        avg_position_size = np.mean(position_sizes) if position_sizes else 0
-        max_position_size = overall_max_position if overall_max_position > 0 else 0
-        
-        # Calculate average holding periods (in 1-minute bars)
-        holding_periods = []
-        for sell_idx in sell_signals.index:
-            # Find when this position was first opened
-            # Look backwards for the first BUY signal where position was 0 before
-            for i in range(sell_idx - 1, -1, -1):
-                if i == 0 or df.iloc[i-1]['position_shares'] == 0:
-                    holding_period = sell_idx - i
-                    holding_periods.append(holding_period)
-                    break
+            if buy_idx is not None:
+                holding_period = sell_idx - buy_idx
+                holding_periods.append(holding_period)
         
         avg_holding_period = np.mean(holding_periods) if holding_periods else 0
         
@@ -463,14 +441,10 @@ class EMAAccumulationBacktester:
                 'max_drawdown': max_drawdown,
                 'max_drawdown_pct': max_drawdown_pct
             },
-            'accumulation_statistics': {
-                'avg_position_size_shares': avg_position_size,
-                'max_position_size_shares': max_position_size,
+            'timing_statistics': {
                 'avg_holding_period_bars': avg_holding_period,
-                'avg_holding_period_minutes': avg_holding_period,
-                'total_buy_signals': len(buy_signals),
-                'ema_period': self.ema_period,
-                'profit_target_pct': self.profit_target * 100
+                'avg_holding_period_minutes': avg_holding_period * 5,
+                'position_size_pct': self.position_size_pct * 100
             }
         }
     
@@ -488,7 +462,7 @@ class EMAAccumulationBacktester:
         try:
             # Generate filename with timestamp
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'{self.output_dir}/{symbol}_emaAccumulation_backtest_{timestamp}.csv'
+            filename = f'{self.output_dir}/{symbol}_openMomentum_backtest_{timestamp}.csv'
             
             # Prepare data for CSV (ensure proper formatting)
             csv_data = df.copy()
@@ -526,13 +500,12 @@ class EMAAccumulationBacktester:
         """
         try:
             # Create figure with subplots
-            fig, axes = plt.subplots(2, 3, figsize=(20, 12))
-            fig.suptitle(f'EMA Accumulation Strategy - {symbol}', fontsize=16, fontweight='bold')
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            fig.suptitle(f'Open Momentum Strategy - {symbol}', fontsize=16, fontweight='bold')
             
-            # Plot 1: Price chart with EMA and signals
+            # Plot 1: Price chart with signals
             ax1 = axes[0, 0]
-            ax1.plot(df.index, df['close'], label='Close Price', alpha=0.7, linewidth=1, color='blue')
-            ax1.plot(df.index, df['ema_21'], label=f'{self.ema_period}-EMA', alpha=0.8, linewidth=1, color='orange')
+            ax1.plot(df.index, df['close'], label='Close Price', alpha=0.7, linewidth=1)
             
             # Mark buy and sell signals
             buy_signals = df[df['signal'] == 'BUY']
@@ -540,57 +513,41 @@ class EMAAccumulationBacktester:
             
             if not buy_signals.empty:
                 ax1.scatter(buy_signals.index, buy_signals['close'], 
-                           color='green', marker='^', s=30, label='Buy Signal', alpha=0.6)
+                           color='green', marker='^', s=50, label='Buy Signal', alpha=0.8)
             
             if not sell_signals.empty:
                 ax1.scatter(sell_signals.index, sell_signals['close'], 
                            color='red', marker='v', s=50, label='Sell Signal', alpha=0.8)
             
-            ax1.set_title('Price Action with EMA and Trading Signals')
+            ax1.set_title('Price Action with Trading Signals')
             ax1.set_ylabel('Price ($)')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
             
-            # Plot 2: Position size over time
+            # Plot 2: Equity curve
             ax2 = axes[0, 1]
-            ax2.plot(df.index, df['position_shares'], label='Position Size (Shares)', color='purple', linewidth=1)
-            ax2.fill_between(df.index, df['position_shares'], alpha=0.3, color='purple')
-            ax2.set_title('Position Size Accumulation')
-            ax2.set_ylabel('Shares Held')
+            ax2.plot(df.index, df['equity'], label='Equity Curve', color='blue', linewidth=2)
+            ax2.axhline(y=self.initial_capital, color='gray', linestyle='--', alpha=0.5, label='Initial Capital')
+            ax2.set_title('Equity Curve')
+            ax2.set_ylabel('Equity ($)')
             ax2.legend()
             ax2.grid(True, alpha=0.3)
             
-            # Plot 3: Rolling average entry price vs current price
-            ax3 = axes[0, 2]
-            ax3.plot(df.index, df['close'], label='Current Price', alpha=0.7, linewidth=1, color='blue')
-            ax3.plot(df.index, df['avg_entry_price'], label='Avg Entry Price', alpha=0.8, linewidth=1, color='red')
-            ax3.set_title('Current Price vs Average Entry Price')
-            ax3.set_ylabel('Price ($)')
-            ax3.legend()
-            ax3.grid(True, alpha=0.3)
+            # Plot 3: Open momentum histogram
+            ax3 = axes[1, 0]
+            momentum_data = df['open_momentum'].dropna()
+            if not momentum_data.empty:
+                ax3.hist(momentum_data, bins=50, alpha=0.7, color='purple', edgecolor='black')
+                ax3.axvline(x=0, color='red', linestyle='--', alpha=0.7, label='Zero Line')
+                ax3.set_title('Open Momentum Distribution')
+                ax3.set_xlabel('Open Momentum ($)')
+                ax3.set_ylabel('Frequency')
+                ax3.legend()
+                ax3.grid(True, alpha=0.3)
             
-            # Plot 4: Rolling PnL since position opened
-            ax4 = axes[1, 0]
-            ax4.plot(df.index, df['rolling_pnl'], label='Rolling PnL', color='green', linewidth=1)
-            ax4.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-            ax4.fill_between(df.index, df['rolling_pnl'], alpha=0.3, color='green')
-            ax4.set_title('Rolling PnL Since Position Opened')
-            ax4.set_ylabel('PnL ($)')
-            ax4.legend()
-            ax4.grid(True, alpha=0.3)
-            
-            # Plot 5: Equity curve
-            ax5 = axes[1, 1]
-            ax5.plot(df.index, df['equity'], label='Equity Curve', color='blue', linewidth=2)
-            ax5.axhline(y=self.initial_capital, color='gray', linestyle='--', alpha=0.5, label='Initial Capital')
-            ax5.set_title('Equity Curve')
-            ax5.set_ylabel('Equity ($)')
-            ax5.legend()
-            ax5.grid(True, alpha=0.3)
-            
-            # Plot 6: Performance statistics
-            ax6 = axes[1, 2]
-            ax6.axis('off')
+            # Plot 4: Performance statistics
+            ax4 = axes[1, 1]
+            ax4.axis('off')
             
             # Create performance statistics text
             stats_text = f"""
@@ -609,21 +566,15 @@ Profit Factor: {summary['performance_metrics']['profit_factor']:.2f}
 Sharpe Ratio: {summary['performance_metrics']['sharpe_ratio']:.3f}
 Max Drawdown: {summary['performance_metrics']['max_drawdown_pct']:.2f}%
 
-ACCUMULATION STATS
-Avg Position Size: {summary['accumulation_statistics']['avg_position_size_shares']:.1f} shares
-Max Position Size: {summary['accumulation_statistics']['max_position_size_shares']:.0f} shares
-Avg Hold Time: {summary['accumulation_statistics']['avg_holding_period_minutes']:.1f} min
-Total Buy Signals: {summary['accumulation_statistics']['total_buy_signals']}
-
-EMA Period: {summary['accumulation_statistics']['ema_period']}
-Profit Target: {summary['accumulation_statistics']['profit_target_pct']:.1f}%
+Avg Hold Time: {summary['timing_statistics']['avg_holding_period_minutes']:.1f} min
+Position Size: {summary['timing_statistics']['position_size_pct']:.1f}%
 
 Data Period: {summary['data_period']['start_date'].strftime('%Y-%m-%d')} to 
 {summary['data_period']['end_date'].strftime('%Y-%m-%d')}
 Total Bars: {summary['data_period']['total_bars']:,}
             """
             
-            ax6.text(0.05, 0.95, stats_text, transform=ax6.transAxes, fontsize=9,
+            ax4.text(0.05, 0.95, stats_text, transform=ax4.transAxes, fontsize=10,
                     verticalalignment='top', fontfamily='monospace',
                     bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
             
@@ -631,7 +582,7 @@ Total Bars: {summary['data_period']['total_bars']:,}
             
             # Save chart
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            chart_filename = f'{self.charts_dir}/{symbol}_emaAccumulation_analysis_{timestamp}.png'
+            chart_filename = f'{self.charts_dir}/{symbol}_openMomentum_analysis_{timestamp}.png'
             plt.savefig(chart_filename, dpi=300, bbox_inches='tight')
             plt.close()
             
@@ -651,7 +602,7 @@ Total Bars: {summary['data_period']['total_bars']:,}
         """
         symbol = summary['symbol']
         
-        print(f"\n📊 EMA ACCUMULATION STRATEGY RESULTS: {symbol}")
+        print(f"\n📊 OPEN MOMENTUM STRATEGY RESULTS: {symbol}")
         print("=" * 70)
         
         if summary['trade_statistics']['total_trades'] == 0:
@@ -662,7 +613,7 @@ Total Bars: {summary['data_period']['total_bars']:,}
         print(f"📅 DATA PERIOD")
         print(f"   Start Date: {summary['data_period']['start_date'].strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"   End Date: {summary['data_period']['end_date'].strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"   Total 1-min Bars: {summary['data_period']['total_bars']:,}")
+        print(f"   Total 5-min Bars: {summary['data_period']['total_bars']:,}")
         print(f"   Trading Days: {summary['data_period']['trading_days']}")
         
         # Trade statistics
@@ -691,16 +642,12 @@ Total Bars: {summary['data_period']['total_bars']:,}
         print(f"   Sharpe Ratio: {perf_metrics['sharpe_ratio']:.3f}")
         print(f"   Maximum Drawdown: ${perf_metrics['max_drawdown']:.2f} ({perf_metrics['max_drawdown_pct']:.2f}%)")
         
-        # Accumulation statistics
-        accum_stats = summary['accumulation_statistics']
-        print(f"\n📊 ACCUMULATION STATISTICS")
-        print(f"   Average Position Size: {accum_stats['avg_position_size_shares']:.1f} shares")
-        print(f"   Maximum Position Size: {accum_stats['max_position_size_shares']:.0f} shares")
-        print(f"   Average Holding Period: {accum_stats['avg_holding_period_bars']:.1f} bars")
-        print(f"   Average Holding Period: {accum_stats['avg_holding_period_minutes']:.1f} minutes")
-        print(f"   Total Buy Signals: {accum_stats['total_buy_signals']}")
-        print(f"   EMA Period: {accum_stats['ema_period']}")
-        print(f"   Profit Target: {accum_stats['profit_target_pct']:.1f}%")
+        # Timing statistics
+        timing_stats = summary['timing_statistics']
+        print(f"\n⏱️ TIMING STATISTICS")
+        print(f"   Average Holding Period: {timing_stats['avg_holding_period_bars']:.1f} bars")
+        print(f"   Average Holding Period: {timing_stats['avg_holding_period_minutes']:.1f} minutes")
+        print(f"   Position Size: {timing_stats['position_size_pct']:.1f}% of equity")
         
         # Strategy insights
         print(f"\n🔍 STRATEGY INSIGHTS")
@@ -721,36 +668,36 @@ Total Bars: {summary['data_period']['total_bars']:,}
         else:
             print(f"   ❌ Poor profit factor")
         
-        if accum_stats['avg_holding_period_minutes'] < 30:
-            print(f"   ⚡ Very short-term strategy (avg {accum_stats['avg_holding_period_minutes']:.1f} min holds)")
-        elif accum_stats['avg_holding_period_minutes'] < 120:
-            print(f"   🕐 Short-term strategy (avg {accum_stats['avg_holding_period_minutes']:.1f} min holds)")
+        if timing_stats['avg_holding_period_minutes'] < 30:
+            print(f"   ⚡ Very short-term strategy (avg {timing_stats['avg_holding_period_minutes']:.1f} min holds)")
+        elif timing_stats['avg_holding_period_minutes'] < 120:
+            print(f"   🕐 Short-term strategy (avg {timing_stats['avg_holding_period_minutes']:.1f} min holds)")
         else:
-            print(f"   🕑 Medium-term strategy (avg {accum_stats['avg_holding_period_minutes']:.1f} min holds)")
+            print(f"   🕑 Medium-term strategy (avg {timing_stats['avg_holding_period_minutes']:.1f} min holds)")
         
         print("=" * 70)
     
     def run_backtest(self, symbol, period_type="day", period=10):
         """
-        Run complete backtest for the EMA Accumulation strategy
+        Run complete backtest for the Open Momentum strategy
         
         Args:
             symbol (str): Stock symbol to backtest
-            period_type (str): Period type for data fetching - For 1-min data, should be 'day'
+            period_type (str): Period type for data fetching - For 5-min data, should be 'day'
             period (int): Number of periods - For 'day': 1, 2, 3, 4, 5, 10
             
         Returns:
             tuple: (DataFrame with results, dict with summary, str csv_path, str chart_path)
         """
-        print(f"\n🚀 === EMA ACCUMULATION STRATEGY BACKTEST ===")
+        print(f"\n🚀 === OPEN MOMENTUM STRATEGY BACKTEST ===")
         print(f"Symbol: {symbol}")
-        print(f"Strategy: Buy 1 share when price < {self.ema_period}-EMA, Exit at {self.profit_target*100:.1f}% profit")
-        print(f"Data: 1-minute bars, {period} {period_type}")
-        print(f"No stop loss, accumulation strategy")
+        print(f"Strategy: Buy when open > prev_open, Sell when open < prev_open")
+        print(f"Data: 5-minute bars, {period} {period_type}")
+        print(f"Position Size: {self.position_size_pct*100:.1f}% of equity")
         print("=" * 60)
         
-        # Fetch data with proper API parameters for 1-minute data
-        df = self.fetch_data(symbol, period_type=period_type, period=period, frequency_type="minute", frequency=1)
+        # Fetch data with proper API parameters for 5-minute data
+        df = self.fetch_data(symbol, period_type=period_type, period=period, frequency_type="minute", frequency=5)
         
         if df.empty:
             print("❌ No data available for backtesting")
@@ -779,68 +726,29 @@ Total Bars: {summary['data_period']['total_bars']:,}
         print("🎨 Creating performance visualization...")
         chart_path = self.create_performance_visualization(df, summary, symbol)
         
-        # Generate automatic visualizations using the dedicated visualizer
-        if csv_path:
-            self._generate_automatic_visualizations(csv_path, symbol)
-        
         return df, summary, csv_path, chart_path
-    
-    def _generate_automatic_visualizations(self, csv_filename: str, symbol: str):
-        """
-        Automatically generate visualizations after saving CSV data
-        
-        Args:
-            csv_filename: Path to the saved CSV file
-            symbol: Stock symbol
-        """
-        try:
-            print(f"\n🎨 Generating automatic visualizations for {symbol}...")
-            
-            # Initialize the visualizer with the CSV file
-            visualizer = EMAAccumulationVisualizer(csv_filename)
-            
-            # Generate comprehensive visualization
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            comprehensive_chart_path = f'charts/{symbol}_emaAccumulation_comprehensive_visualization.png'
-            
-            print(f"   📊 Creating comprehensive visualization...")
-            visualizer.create_comprehensive_visualization(save_path=comprehensive_chart_path)
-            
-            # Generate simple visualization
-            simple_chart_path = f'charts/{symbol}_emaAccumulation_simple_visualization.png'
-            
-            print(f"   📈 Creating simple visualization...")
-            visualizer.create_simple_chart(save_path=simple_chart_path)
-            
-            print(f"✅ Visualizations completed successfully!")
-            print(f"   📊 Comprehensive chart: {comprehensive_chart_path}")
-            print(f"   📈 Simple chart: {simple_chart_path}")
-            
-        except Exception as e:
-            print(f"⚠️  Warning: Could not generate automatic visualizations: {str(e)}")
-            print(f"   You can manually run: python3 visualizers/emaAccumulation_visualization.py {csv_filename}")
 
 
 def main():
     """
-    Main function for running the EMA Accumulation backtester
+    Main function for running the Open Momentum backtester
     """
     parser = argparse.ArgumentParser(
-        description="EMA Accumulation Backtester - 1-minute accumulation strategy",
+        description="Open Momentum Backtester - 5-minute momentum strategy",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run backtest on AAPL with default settings (10 days, 0.5% profit target)
-  python3 ema_accumulation_backtest.py AAPL
+  # Run backtest on AAPL with default settings (6 months, 10% position size)
+  python3 openMomentum_backtest.py AAPL
   
-  # Run backtest on NVDA with 5 days of data
-  python3 ema_accumulation_backtest.py NVDA --period 5
+  # Run backtest on NVDA with 3 months of data
+  python3 openMomentum_backtest.py NVDA --period 3 --period-type month
   
-  # Run backtest on TSLA with 1% profit target
-  python3 ema_accumulation_backtest.py TSLA --profit-target 0.01
+  # Run backtest on TSLA with 5% position size
+  python3 openMomentum_backtest.py TSLA --position-size 5.0
   
-  # Run backtest with custom EMA period and capital
-  python3 ema_accumulation_backtest.py AAPL --ema-period 50 --initial-capital 50000
+  # Run backtest with 1 year of data and custom capital
+  python3 openMomentum_backtest.py AAPL --period 1 --period-type year --initial-capital 50000
         """
     )
     
@@ -853,30 +761,23 @@ Examples:
     parser.add_argument(
         '--period-type',
         type=str,
-        choices=['day'],
-        default='day',
-        help='Period type for data fetching (default: day) - For 1-min data, must be day'
+        choices=['day', 'month', 'year'],
+        default='month',
+        help='Period type for data fetching (default: month)'
     )
     
     parser.add_argument(
         '--period',
         type=int,
-        default=10,
-        help='Number of periods to fetch (default: 10 days)'
+        default=6,
+        help='Number of periods to fetch (default: 6)'
     )
     
     parser.add_argument(
-        '--ema-period',
-        type=int,
-        default=5,
-        help='EMA period for trend filter (default: 21)'
-    )
-    
-    parser.add_argument(
-        '--profit-target',
+        '--position-size',
         type=float,
-        default=0.005,
-        help='Profit target as decimal (default: 0.005 = 0.5%)'
+        default=10.0,
+        help='Position size as percentage of equity (default: 10.0)'
     )
     
     parser.add_argument(
@@ -892,22 +793,20 @@ Examples:
     symbol = args.symbol.upper()
     
     print("=" * 80)
-    print("EMA ACCUMULATION BACKTESTER")
-    print("1-Minute Accumulation Strategy")
+    print("OPEN MOMENTUM BACKTESTER")
+    print("5-Minute Momentum Strategy")
     print("=" * 80)
     print(f"Symbol: {symbol}")
     print(f"Period: {args.period} {args.period_type}")
-    print(f"EMA Period: {args.ema_period}")
-    print(f"Profit Target: {args.profit_target*100:.1f}%")
+    print(f"Position Size: {args.position_size}% of equity")
     print(f"Initial Capital: ${args.initial_capital:,.2f}")
     print("=" * 80)
     
     try:
         # Initialize backtester
-        backtester = EMAAccumulationBacktester(
+        backtester = OpenMomentumBacktester(
             initial_capital=args.initial_capital,
-            ema_period=args.ema_period,
-            profit_target=args.profit_target
+            position_size_pct=args.position_size
         )
         
         # Run backtest
@@ -922,7 +821,7 @@ Examples:
             backtester.print_performance_summary(summary)
             
             print(f"\n✅ BACKTEST COMPLETED SUCCESSFULLY")
-            print(f"📊 Processed {len(results_df):,} 1-minute bars")
+            print(f"📊 Processed {len(results_df):,} 5-minute bars")
             print(f"💾 Results saved to: {csv_path}")
             print(f"🎨 Chart saved to: {chart_path}")
             
@@ -933,7 +832,6 @@ Examples:
                 print(f"   Win Rate: {summary['trade_statistics']['win_rate']:.1f}%")
                 print(f"   ROI: {summary['performance_metrics']['roi']:.2f}%")
                 print(f"   Profit Factor: {summary['performance_metrics']['profit_factor']:.2f}")
-                print(f"   Avg Position Size: {summary['accumulation_statistics']['avg_position_size_shares']:.1f} shares")
             
         else:
             print(f"\n❌ Backtest failed for {symbol}")

@@ -74,9 +74,9 @@ class OrderHandler:
             
             if response.status_code == 200:
                 accounts = response.json()
-                if accounts and 'accounts' in accounts and len(accounts['accounts']) > 0:
-                    # Use the first account
-                    self.account_number = accounts['accounts'][0]['accountId']
+                if accounts and len(accounts) > 0:
+                    # Use the first account's hashValue
+                    self.account_number = accounts[0]['hashValue']
                 else:
                     print("No accounts found")
                     return {}
@@ -136,12 +136,12 @@ class OrderHandler:
                     'timestamp': timestamp
                 }
             
-            # Create order payload for Schwab API
+            # Create order payload for Schwab API - aligned with API documentation
             order_payload = {
-                "orderStrategyType": "SINGLE",
                 "orderType": "MARKET",
                 "session": "NORMAL",
                 "duration": "DAY",
+                "orderStrategyType": "SINGLE",
                 "orderLegCollection": [
                     {
                         "instruction": action_type,
@@ -256,13 +256,13 @@ class OrderHandler:
                     'timestamp': timestamp
                 }
             
-            # Create order payload for Schwab API
+            # Create order payload for Schwab API - aligned with API documentation
             order_payload = {
-                "orderStrategyType": "SINGLE",
                 "orderType": "LIMIT",
                 "session": "SEAMLESS",  # SEAMLESS for after hours
-                "duration": "GOOD_TILL_CANCEL",  # GTC keeps the order active until filled or cancelled
                 "price": str(limit_price),  # Price must be a string in API
+                "duration": "GOOD_TILL_CANCEL",  # GTC keeps the order active until filled or cancelled
+                "orderStrategyType": "SINGLE",
                 "orderLegCollection": [
                     {
                         "instruction": action_type,
@@ -336,25 +336,25 @@ class OrderHandler:
                 'timestamp': timestamp
             }
     
-    def buy_market(self, symbol: str, shares: int, current_price: float = None,
+    def buy_market(self, symbol: str, shares: float = None,
                    timestamp: datetime = None) -> Dict:
         """Convenience method for BUY market orders."""
-        return self.place_market_order("BUY", symbol, shares, current_price, timestamp)
+        return self.place_market_order("BUY", symbol, shares, timestamp)
     
-    def sell_market(self, symbol: str, shares: int, current_price: float = None,
+    def sell_market(self, symbol: str, shares: float = None,
                     timestamp: datetime = None) -> Dict:
         """Convenience method for SELL market orders."""
-        return self.place_market_order("SELL", symbol, shares, current_price, timestamp)
+        return self.place_market_order("SELL", symbol, shares,timestamp)
     
-    def sell_short_market(self, symbol: str, shares: int, current_price: float = None,
+    def sell_short_market(self, symbol: str, shares:float = None,
                          timestamp: datetime = None) -> Dict:
         """Convenience method for SELL_SHORT market orders."""
-        return self.place_market_order("SELL_SHORT", symbol, shares, current_price, timestamp)
+        return self.place_market_order("SELL_SHORT", symbol, shares, timestamp)
     
-    def buy_to_cover_market(self, symbol: str, shares: int, current_price: float = None,
+    def buy_to_cover_market(self, symbol: str, shares: float = None,
                            timestamp: datetime = None) -> Dict:
         """Convenience method for BUY_TO_COVER market orders."""
-        return self.place_market_order("BUY_TO_COVER", symbol, shares, current_price, timestamp)
+        return self.place_market_order("BUY_TO_COVER", symbol, shares, timestamp)
     
     def buy_limit(self, symbol: str, shares: int, limit_price: float,
                   timestamp: datetime = None) -> Dict:
@@ -376,6 +376,348 @@ class OrderHandler:
         """Convenience method for BUY_TO_COVER limit orders."""
         return self.place_limit_order("BUY_TO_COVER", symbol, shares, limit_price, timestamp)
     
+    def place_stop_order(self, action_type: str, symbol: str, shares: int,
+                        stop_price: float, timestamp: datetime = None) -> Dict:
+        """
+        Place a stop order using Schwab API.
+        
+        Args:
+            action_type: Order action ("BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER")
+            symbol: Stock symbol
+            shares: Number of shares
+            stop_price: Stop price for the order
+            timestamp: Order timestamp
+            
+        Returns:
+            Order placement result
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+            
+        # Validate action type
+        valid_actions = ["BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"]
+        if action_type not in valid_actions:
+            return {
+                'status': 'rejected',
+                'reason': f'Invalid action type: {action_type}. Must be one of {valid_actions}',
+                'timestamp': timestamp
+            }
+        
+        self.logger.info(f"Attempting to place {action_type} stop order for {shares} shares of {symbol} @ ${stop_price:.2f}")
+        
+        try:
+            if shares <= 0:
+                return {
+                    'status': 'rejected',
+                    'reason': 'Invalid share quantity',
+                    'timestamp': timestamp
+                }
+            
+            # Create order payload for Schwab API - aligned with API documentation
+            order_payload = {
+                "orderType": "STOP",
+                "session": "NORMAL",
+                "stopPrice": str(stop_price),  # Stop price must be a string in API
+                "duration": "DAY",
+                "orderStrategyType": "SINGLE",
+                "orderLegCollection": [
+                    {
+                        "instruction": action_type,
+                        "quantity": shares,
+                        "instrument": {
+                            "symbol": symbol,
+                            "assetType": "EQUITY"
+                        }
+                    }
+                ]
+            }
+            
+            # Make API request to Schwab
+            url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders"
+            headers = {
+                "Authorization": f"Bearer {self.tokens['access_token']}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            
+            response = requests.post(url, json=order_payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                order_id = response.headers.get('Location', '').split('/')[-1]
+                
+                # Record successful order
+                order_record = {
+                    'timestamp': timestamp,
+                    'symbol': symbol,
+                    'action_type': action_type,
+                    'order_type': 'stop',
+                    'shares': shares,
+                    'stop_price': stop_price,
+                    'order_id': order_id,
+                    'status': 'submitted'
+                }
+                
+                self.order_history.append(order_record)
+                
+                self.logger.info(f"{action_type} stop order submitted: {shares} shares of {symbol} at ${stop_price:.2f}, Order ID: {order_id}")
+                
+                return {
+                    'status': 'submitted',
+                    'symbol': symbol,
+                    'action_type': action_type,
+                    'order_type': 'stop',
+                    'shares': shares,
+                    'stop_price': stop_price,
+                    'order_id': order_id,
+                    'timestamp': timestamp
+                }
+            else:
+                error_msg = f"Failed to place stop order: {response.status_code} - {response.text}"
+                self.logger.error(error_msg)
+                return {
+                    'status': 'rejected',
+                    'reason': error_msg,
+                    'timestamp': timestamp
+                }
+            
+        except Exception as e:
+            self.logger.error(f"Error placing {action_type} stop order: {str(e)}")
+            return {
+                'status': 'error',
+                'reason': str(e),
+                'timestamp': timestamp
+            }
+    
+    def place_stop_limit_order(self, action_type: str, symbol: str, shares: int,
+                              stop_price: float, limit_price: float, timestamp: datetime = None) -> Dict:
+        """
+        Place a stop-limit order using Schwab API.
+        
+        Args:
+            action_type: Order action ("BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER")
+            symbol: Stock symbol
+            shares: Number of shares
+            stop_price: Stop price for the order
+            limit_price: Limit price for the order
+            timestamp: Order timestamp
+            
+        Returns:
+            Order placement result
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+            
+        # Validate action type
+        valid_actions = ["BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"]
+        if action_type not in valid_actions:
+            return {
+                'status': 'rejected',
+                'reason': f'Invalid action type: {action_type}. Must be one of {valid_actions}',
+                'timestamp': timestamp
+            }
+        
+        self.logger.info(f"Attempting to place {action_type} stop-limit order for {shares} shares of {symbol} stop @ ${stop_price:.2f}, limit @ ${limit_price:.2f}")
+        
+        try:
+            if shares <= 0:
+                return {
+                    'status': 'rejected',
+                    'reason': 'Invalid share quantity',
+                    'timestamp': timestamp
+                }
+            
+            # Create order payload for Schwab API - aligned with API documentation
+            order_payload = {
+                "orderType": "STOP_LIMIT",
+                "session": "NORMAL",
+                "price": str(limit_price),  # Limit price must be a string in API
+                "stopPrice": str(stop_price),  # Stop price must be a string in API
+                "duration": "DAY",
+                "orderStrategyType": "SINGLE",
+                "orderLegCollection": [
+                    {
+                        "instruction": action_type,
+                        "quantity": shares,
+                        "instrument": {
+                            "symbol": symbol,
+                            "assetType": "EQUITY"
+                        }
+                    }
+                ]
+            }
+            
+            # Make API request to Schwab
+            url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders"
+            headers = {
+                "Authorization": f"Bearer {self.tokens['access_token']}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            
+            response = requests.post(url, json=order_payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                order_id = response.headers.get('Location', '').split('/')[-1]
+                
+                # Record successful order
+                order_record = {
+                    'timestamp': timestamp,
+                    'symbol': symbol,
+                    'action_type': action_type,
+                    'order_type': 'stop_limit',
+                    'shares': shares,
+                    'stop_price': stop_price,
+                    'limit_price': limit_price,
+                    'order_id': order_id,
+                    'status': 'submitted'
+                }
+                
+                self.order_history.append(order_record)
+                
+                self.logger.info(f"{action_type} stop-limit order submitted: {shares} shares of {symbol} stop @ ${stop_price:.2f}, limit @ ${limit_price:.2f}, Order ID: {order_id}")
+                
+                return {
+                    'status': 'submitted',
+                    'symbol': symbol,
+                    'action_type': action_type,
+                    'order_type': 'stop_limit',
+                    'shares': shares,
+                    'stop_price': stop_price,
+                    'limit_price': limit_price,
+                    'order_id': order_id,
+                    'timestamp': timestamp
+                }
+            else:
+                error_msg = f"Failed to place stop-limit order: {response.status_code} - {response.text}"
+                self.logger.error(error_msg)
+                return {
+                    'status': 'rejected',
+                    'reason': error_msg,
+                    'timestamp': timestamp
+                }
+            
+        except Exception as e:
+            self.logger.error(f"Error placing {action_type} stop-limit order: {str(e)}")
+            return {
+                'status': 'error',
+                'reason': str(e),
+                'timestamp': timestamp
+            }
+    
+    def place_trailing_stop_order(self, action_type: str, symbol: str, shares: int,
+                                 stop_price_offset: float, timestamp: datetime = None) -> Dict:
+        """
+        Place a trailing stop order using Schwab API.
+        
+        Args:
+            action_type: Order action ("BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER")
+            symbol: Stock symbol
+            shares: Number of shares
+            stop_price_offset: Dollar amount for trailing stop offset
+            timestamp: Order timestamp
+            
+        Returns:
+            Order placement result
+        """
+        if timestamp is None:
+            timestamp = datetime.now()
+            
+        # Validate action type
+        valid_actions = ["BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"]
+        if action_type not in valid_actions:
+            return {
+                'status': 'rejected',
+                'reason': f'Invalid action type: {action_type}. Must be one of {valid_actions}',
+                'timestamp': timestamp
+            }
+        
+        self.logger.info(f"Attempting to place {action_type} trailing stop order for {shares} shares of {symbol} with ${stop_price_offset:.2f} offset")
+        
+        try:
+            if shares <= 0:
+                return {
+                    'status': 'rejected',
+                    'reason': 'Invalid share quantity',
+                    'timestamp': timestamp
+                }
+            
+            # Create order payload for Schwab API - aligned with API documentation
+            order_payload = {
+                "orderType": "TRAILING_STOP",
+                "session": "NORMAL",
+                "stopPriceLinkBasis": "BID",
+                "stopPriceLinkType": "VALUE",
+                "stopPriceOffset": stop_price_offset,
+                "duration": "DAY",
+                "orderStrategyType": "SINGLE",
+                "orderLegCollection": [
+                    {
+                        "instruction": action_type,
+                        "quantity": shares,
+                        "instrument": {
+                            "symbol": symbol,
+                            "assetType": "EQUITY"
+                        }
+                    }
+                ]
+            }
+            
+            # Make API request to Schwab
+            url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders"
+            headers = {
+                "Authorization": f"Bearer {self.tokens['access_token']}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            
+            response = requests.post(url, json=order_payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                order_id = response.headers.get('Location', '').split('/')[-1]
+                
+                # Record successful order
+                order_record = {
+                    'timestamp': timestamp,
+                    'symbol': symbol,
+                    'action_type': action_type,
+                    'order_type': 'trailing_stop',
+                    'shares': shares,
+                    'stop_price_offset': stop_price_offset,
+                    'order_id': order_id,
+                    'status': 'submitted'
+                }
+                
+                self.order_history.append(order_record)
+                
+                self.logger.info(f"{action_type} trailing stop order submitted: {shares} shares of {symbol} with ${stop_price_offset:.2f} offset, Order ID: {order_id}")
+                
+                return {
+                    'status': 'submitted',
+                    'symbol': symbol,
+                    'action_type': action_type,
+                    'order_type': 'trailing_stop',
+                    'shares': shares,
+                    'stop_price_offset': stop_price_offset,
+                    'order_id': order_id,
+                    'timestamp': timestamp
+                }
+            else:
+                error_msg = f"Failed to place trailing stop order: {response.status_code} - {response.text}"
+                self.logger.error(error_msg)
+                return {
+                    'status': 'rejected',
+                    'reason': error_msg,
+                    'timestamp': timestamp
+                }
+            
+        except Exception as e:
+            self.logger.error(f"Error placing {action_type} trailing stop order: {str(e)}")
+            return {
+                'status': 'error',
+                'reason': str(e),
+                'timestamp': timestamp
+            }
+    
     def get_order_history_df(self) -> pd.DataFrame:
         """
         Get order history as a pandas DataFrame.
@@ -388,6 +730,82 @@ class OrderHandler:
         
         return pd.DataFrame(self.order_history)
     
+    def get_order_status(self, order_id: str) -> Dict[str, Any]:
+        """
+        Get the status of a specific order
+        
+        Parameters:
+            order_id: The ID of the order to check
+            
+        Returns:
+            Dictionary containing order status information
+        """
+        if not self.account_number:
+            return {"error": "No account number available"}
+        
+        url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders/{order_id}"
+        headers = self._get_auth_headers()
+        
+        try:
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                error_message = f"Failed to get order status: {response.status_code}, {response.text}"
+                self.logger.error(error_message)
+                return {"error": error_message}
+        except Exception as e:
+            error_message = f"Error getting order status: {str(e)}"
+            self.logger.error(error_message)
+            return {"error": error_message}
+    
+    def get_all_orders(self, from_entered_time: str = None, to_entered_time: str = None, 
+                      max_results: int = 3000, status: str = None) -> Dict[str, Any]:
+        """
+        Get all orders for the account with optional filtering
+        
+        Parameters:
+            from_entered_time: Start date in ISO format (e.g., "2024-01-01T00:00:00.000Z")
+            to_entered_time: End date in ISO format (e.g., "2024-12-31T23:59:59.999Z")
+            max_results: Maximum number of orders to return (default 3000)
+            status: Filter by order status (AWAITING_PARENT_ORDER, AWAITING_CONDITION, 
+                   AWAITING_STOP_CONDITION, AWAITING_MANUAL_REVIEW, ACCEPTED, AWAITING_UR_OUT, 
+                   PENDING_ACTIVATION, QUEUED, WORKING, REJECTED, PENDING_CANCEL, CANCELED, 
+                   PENDING_REPLACE, REPLACED, FILLED, EXPIRED, NEW, AWAITING_RELEASE_TIME, 
+                   AWAITING_ACCOUNT_OPENING, AWAITING_FIRST_FILL)
+            
+        Returns:
+            Dictionary containing orders information
+        """
+        if not self.account_number:
+            return {"error": "No account number available"}
+        
+        url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders"
+        headers = self._get_auth_headers()
+        
+        params = {"maxResults": max_results}
+        if from_entered_time:
+            params["fromEnteredTime"] = from_entered_time
+        if to_entered_time:
+            params["toEnteredTime"] = to_entered_time
+        if status:
+            params["status"] = status
+        
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                error_message = f"Failed to get orders: {response.status_code}, {response.text}"
+                self.logger.error(error_message)
+                return {"error": error_message}
+        except Exception as e:
+            error_message = f"Error getting orders: {str(e)}"
+            self.logger.error(error_message)
+            return {"error": error_message}
+    
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
         """
         Cancel an existing order
@@ -399,8 +817,7 @@ class OrderHandler:
             Dictionary containing result of cancellation
         """
         if not self.account_number:
-            print("No account number available")
-            return {"error": "No account number"}
+            return {"error": "No account number available"}
         
         url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders/{order_id}"
         headers = self._get_auth_headers()
@@ -412,11 +829,46 @@ class OrderHandler:
                 return {"status": "SUCCESS", "message": "Order cancelled successfully"}
             else:
                 error_message = f"Failed to cancel order: {response.status_code}, {response.text}"
-                print(error_message)
+                self.logger.error(error_message)
                 return {"error": error_message}
         except Exception as e:
             error_message = f"Error cancelling order: {str(e)}"
-            print(error_message)
+            self.logger.error(error_message)
+            return {"error": error_message}
+    
+    def replace_order(self, order_id: str, new_order_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Replace an existing order with a new order
+        
+        Parameters:
+            order_id: The ID of the order to replace
+            new_order_payload: The new order payload following Schwab API format
+            
+        Returns:
+            Dictionary containing result of order replacement
+        """
+        if not self.account_number:
+            return {"error": "No account number available"}
+        
+        url = f"https://api.schwabapi.com/trader/v1/accounts/{self.account_number}/orders/{order_id}"
+        headers = {
+            "Authorization": f"Bearer {self.tokens['access_token']}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        try:
+            response = requests.put(url, json=new_order_payload, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                return {"status": "SUCCESS", "message": "Order replaced successfully"}
+            else:
+                error_message = f"Failed to replace order: {response.status_code}, {response.text}"
+                self.logger.error(error_message)
+                return {"error": error_message}
+        except Exception as e:
+            error_message = f"Error replacing order: {str(e)}"
+            self.logger.error(error_message)
             return {"error": error_message}
 
 

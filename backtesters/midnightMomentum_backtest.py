@@ -39,9 +39,12 @@ import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'handlers'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'visualizers'))
-from connection_manager import ensure_valid_tokens
-from historical_data_handler import HistoricalDataHandler
-from midnightMomentum_visualization import MidnightMomentumVisualizer
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+# Import from handlers directory
+from handlers.connection_manager import ensure_valid_tokens
+from handlers.historical_data_handler import HistoricalDataHandler
+from visualizers.midnightMomentum_visualization import MidnightMomentumVisualizer
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
