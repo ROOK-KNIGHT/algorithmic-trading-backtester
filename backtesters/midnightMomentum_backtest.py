@@ -74,6 +74,15 @@ class AnalysisConfig:
     min_sample_size: int = 30
     significance_level: float = 0.05
     
+    # Strategy refinement parameters
+    max_hold_days: int = 5  # Cap hold periods to 5 days
+    stop_loss_threshold: float = 0.95  # Use downside_95 for stop-loss
+    regime_filter: str = 'High'  # Only enter in 'High' volatility regime
+    enable_stop_loss: bool = False  # DISABLED - Only target profit exits allowed
+    enable_hold_cap: bool = False  # DISABLED - Only target profit exits allowed
+    enable_regime_filter: bool = False  # DISABLED - Allow entries in any regime
+    enable_eod_exit: bool = False  # DISABLED - Only target profit exits allowed
+    
     def __post_init__(self):
         if self.confidence_levels is None:
             self.confidence_levels = [0.68, 0.90, 0.95, 0.99]
@@ -399,7 +408,7 @@ class StatisticalAnalyzer:
     def apply_thresholds_no_lookahead(self, df: pd.DataFrame, 
                                     window_size: int = None) -> pd.DataFrame:
         """
-        Apply thresholds using expanding or rolling windows to avoid look-ahead bias
+        Vectorized threshold application using expanding or rolling windows to avoid look-ahead bias
         
         Args:
             df: DataFrame with price data
@@ -413,119 +422,189 @@ class StatisticalAnalyzer:
         
         result = df.copy()
         
-        # Initialize downside threshold columns
-        for conf_level in self.config.confidence_levels:
-            conf_pct = int(conf_level * 100)
-            result[f'threshold_{conf_pct}'] = np.nan
-            result[f'below_threshold_{conf_pct}'] = 0
-            result[f'breach_depth_{conf_pct}'] = 0.0
+        # Initialize threshold columns using vectorized operations
+        conf_pcts = [int(conf_level * 100) for conf_level in self.config.confidence_levels]
+        
+        # Vectorized initialization of all threshold columns
+        threshold_cols = {}
+        for conf_pct in conf_pcts:
+            # Downside threshold columns
+            threshold_cols[f'threshold_{conf_pct}'] = np.full(len(result), np.nan)
+            threshold_cols[f'below_threshold_{conf_pct}'] = np.zeros(len(result), dtype=int)
+            threshold_cols[f'breach_depth_{conf_pct}'] = np.zeros(len(result))
             
-            # Initialize upside threshold columns
-            result[f'upside_threshold_{conf_pct}'] = np.nan
-            result[f'above_upside_threshold_{conf_pct}'] = 0
-            result[f'upside_breach_magnitude_{conf_pct}'] = 0.0
+            # Upside threshold columns
+            threshold_cols[f'upside_threshold_{conf_pct}'] = np.full(len(result), np.nan)
+            threshold_cols[f'above_upside_threshold_{conf_pct}'] = np.zeros(len(result), dtype=int)
+            threshold_cols[f'upside_breach_magnitude_{conf_pct}'] = np.zeros(len(result))
+        
+        # Add all columns to result DataFrame at once
+        for col_name, col_data in threshold_cols.items():
+            result[col_name] = col_data
+        
+        # Pre-compute arrays for vectorized operations
+        prev_close_arr = result['prev_close'].values
+        low_arr = result['low'].values
+        high_arr = result['high'].values
         
         # Calculate thresholds using expanding window for early periods,
         # then rolling window for later periods
-        min_periods = max(20, window_size // 2)  # Reduced from 30 to 20
+        min_periods = max(20, window_size // 2)
         
+        # Batch process thresholds for better performance
         for i in range(min_periods, len(result)):
             # Use expanding window for early periods, rolling for later
             # CRITICAL: Use data up to i-1 to avoid look-ahead bias
             if i < window_size * 2:
-                historical_data = result.iloc[:i-1]  # Changed from :i to :i-1
+                historical_data = result.iloc[:i-1]
             else:
-                historical_data = result.iloc[i-window_size:i-1]  # Changed from :i to :i-1
+                historical_data = result.iloc[i-window_size:i-1]
             
-            # Calculate downside thresholds on historical data only (excluding current day)
+            # Calculate thresholds on historical data only (excluding current day)
             thresholds = self.calculate_empirical_thresholds(historical_data)
-            
-            # Calculate upside thresholds on historical data only (excluding current day)
             upside_thresholds = self.calculate_profit_potential_thresholds(historical_data)
             
-            # If no thresholds calculated due to insufficient data, use previous valid thresholds
+            # Use previous valid thresholds if current calculation fails
             if not thresholds and i > min_periods:
-                # Look back for the most recent valid thresholds
-                for j in range(i-1, min_periods-1, -1):
-                    prev_thresholds = {}
-                    for conf_level in self.config.confidence_levels:
-                        conf_pct = int(conf_level * 100)
-                        threshold_col = f'threshold_{conf_pct}'
-                        if threshold_col in result.columns:
-                            prev_threshold_price = result.iloc[j][threshold_col]
-                            if pd.notna(prev_threshold_price):
-                                # Convert back to percentage drop for consistency
-                                prev_close_j = result.iloc[j]['prev_close']
-                                if pd.notna(prev_close_j) and prev_close_j > 0:
-                                    threshold_drop = (1 - prev_threshold_price / prev_close_j) * 100
-                                    prev_thresholds[f'threshold_{conf_pct}'] = threshold_drop
-                    if prev_thresholds:
-                        thresholds = prev_thresholds
-                        break
+                thresholds = self._get_previous_valid_thresholds(result, i, min_periods, 'threshold')
             
-            # Similar logic for upside thresholds
             if not upside_thresholds and i > min_periods:
-                for j in range(i-1, min_periods-1, -1):
-                    prev_upside_thresholds = {}
-                    for conf_level in self.config.confidence_levels:
-                        conf_pct = int(conf_level * 100)
-                        upside_threshold_col = f'upside_threshold_{conf_pct}'
-                        if upside_threshold_col in result.columns:
-                            prev_upside_threshold_price = result.iloc[j][upside_threshold_col]
-                            if pd.notna(prev_upside_threshold_price):
-                                # Convert back to percentage gain for consistency
-                                prev_close_j = result.iloc[j]['prev_close']
-                                if pd.notna(prev_close_j) and prev_close_j > 0:
-                                    threshold_gain = (prev_upside_threshold_price / prev_close_j - 1) * 100
-                                    prev_upside_thresholds[f'upside_threshold_{conf_pct}'] = threshold_gain
-                    if prev_upside_thresholds:
-                        upside_thresholds = prev_upside_thresholds
-                        break
+                upside_thresholds = self._get_previous_valid_thresholds(result, i, min_periods, 'upside_threshold')
             
-            # Apply thresholds to current day
-            current_row = result.iloc[i]
-            prev_close = current_row['prev_close']
-            current_low = current_row['low']
-            current_high = current_row['high']
+            # Vectorized threshold application for current row
+            prev_close = prev_close_arr[i]
+            current_low = low_arr[i]
+            current_high = high_arr[i]
             
             if pd.notna(prev_close) and pd.notna(current_low) and pd.notna(current_high):
-                # Apply downside thresholds
-                for conf_level in self.config.confidence_levels:
-                    conf_pct = int(conf_level * 100)
-                    threshold_key = f'threshold_{conf_pct}'
-                    
-                    if threshold_key in thresholds:
-                        threshold_drop = thresholds[threshold_key]
-                        # Threshold price should be BELOW previous close by the threshold drop percentage
-                        threshold_price = prev_close * (1 - threshold_drop / 100)
-                        
-                        result.iloc[i, result.columns.get_loc(f'threshold_{conf_pct}')] = threshold_price
-                        
-                        # Check if low breached threshold (went below the threshold)
-                        if current_low < threshold_price:
-                            result.iloc[i, result.columns.get_loc(f'below_threshold_{conf_pct}')] = 1
-                            breach_depth = (threshold_price - current_low) / prev_close * 100
-                            result.iloc[i, result.columns.get_loc(f'breach_depth_{conf_pct}')] = breach_depth
+                # Vectorized downside threshold processing
+                self._apply_downside_thresholds_vectorized(
+                    result, i, thresholds, prev_close, current_low, conf_pcts
+                )
                 
-                # Apply upside thresholds
-                for conf_level in self.config.confidence_levels:
-                    conf_pct = int(conf_level * 100)
-                    upside_threshold_key = f'upside_threshold_{conf_pct}'
-                    
-                    if upside_threshold_key in upside_thresholds:
-                        upside_threshold_gain = upside_thresholds[upside_threshold_key]
-                        # Upside threshold price should be ABOVE previous close by the threshold gain percentage
-                        upside_threshold_price = prev_close * (1 + upside_threshold_gain / 100)
-                        
-                        result.iloc[i, result.columns.get_loc(f'upside_threshold_{conf_pct}')] = upside_threshold_price
-                        
-                        # Check if high breached upside threshold (went above the threshold)
-                        if current_high > upside_threshold_price:
-                            result.iloc[i, result.columns.get_loc(f'above_upside_threshold_{conf_pct}')] = 1
-                            breach_magnitude = (current_high - upside_threshold_price) / prev_close * 100
-                            result.iloc[i, result.columns.get_loc(f'upside_breach_magnitude_{conf_pct}')] = breach_magnitude
+                # Vectorized upside threshold processing
+                self._apply_upside_thresholds_vectorized(
+                    result, i, upside_thresholds, prev_close, current_high, conf_pcts
+                )
         
         return result
+    
+    def _get_previous_valid_thresholds(self, result: pd.DataFrame, current_idx: int, 
+                                     min_periods: int, threshold_type: str) -> Dict[str, float]:
+        """
+        Vectorized lookup of previous valid thresholds
+        
+        Args:
+            result: DataFrame with threshold data
+            current_idx: Current index
+            min_periods: Minimum periods required
+            threshold_type: 'threshold' or 'upside_threshold'
+            
+        Returns:
+            Dictionary of previous valid thresholds
+        """
+        prev_thresholds = {}
+        
+        # Look back for the most recent valid thresholds
+        for j in range(current_idx-1, min_periods-1, -1):
+            for conf_level in self.config.confidence_levels:
+                conf_pct = int(conf_level * 100)
+                threshold_col = f'{threshold_type}_{conf_pct}'
+                
+                if threshold_col in result.columns:
+                    prev_threshold_price = result.iloc[j][threshold_col]
+                    if pd.notna(prev_threshold_price):
+                        # Convert back to percentage for consistency
+                        prev_close_j = result.iloc[j]['prev_close']
+                        if pd.notna(prev_close_j) and prev_close_j > 0:
+                            if threshold_type == 'threshold':
+                                threshold_pct = (1 - prev_threshold_price / prev_close_j) * 100
+                            else:  # upside_threshold
+                                threshold_pct = (prev_threshold_price / prev_close_j - 1) * 100
+                            prev_thresholds[f'{threshold_type}_{conf_pct}'] = threshold_pct
+            
+            if prev_thresholds:
+                break
+        
+        return prev_thresholds
+    
+    def _apply_downside_thresholds_vectorized(self, result: pd.DataFrame, idx: int,
+                                            thresholds: Dict[str, float], prev_close: float,
+                                            current_low: float, conf_pcts: List[int]) -> None:
+        """
+        Vectorized application of downside thresholds
+        
+        Args:
+            result: DataFrame to update
+            idx: Current index
+            thresholds: Dictionary of threshold percentages
+            prev_close: Previous close price
+            current_low: Current low price
+            conf_pcts: List of confidence percentages
+        """
+        # Vectorized threshold price calculations
+        threshold_keys = [f'threshold_{conf_pct}' for conf_pct in conf_pcts]
+        valid_thresholds = {k: v for k, v in thresholds.items() if k in threshold_keys}
+        
+        if not valid_thresholds:
+            return
+        
+        # Calculate all threshold prices at once
+        threshold_drops = np.array([valid_thresholds.get(key, 0) for key in threshold_keys])
+        threshold_prices = prev_close * (1 - threshold_drops / 100)
+        
+        # Vectorized breach detection
+        breaches = current_low < threshold_prices
+        breach_depths = np.where(breaches, (threshold_prices - current_low) / prev_close * 100, 0)
+        
+        # Update result DataFrame
+        for i, conf_pct in enumerate(conf_pcts):
+            threshold_key = f'threshold_{conf_pct}'
+            if threshold_key in valid_thresholds:
+                result.iloc[idx, result.columns.get_loc(f'threshold_{conf_pct}')] = threshold_prices[i]
+                result.iloc[idx, result.columns.get_loc(f'below_threshold_{conf_pct}')] = int(breaches[i])
+                result.iloc[idx, result.columns.get_loc(f'breach_depth_{conf_pct}')] = breach_depths[i]
+    
+    def _apply_upside_thresholds_vectorized(self, result: pd.DataFrame, idx: int,
+                                          upside_thresholds: Dict[str, float], prev_close: float,
+                                          current_high: float, conf_pcts: List[int]) -> None:
+        """
+        Vectorized application of upside thresholds
+        
+        Args:
+            result: DataFrame to update
+            idx: Current index
+            upside_thresholds: Dictionary of upside threshold percentages
+            prev_close: Previous close price
+            current_high: Current high price
+            conf_pcts: List of confidence percentages
+        """
+        # Vectorized upside threshold price calculations
+        upside_threshold_keys = [f'upside_threshold_{conf_pct}' for conf_pct in conf_pcts]
+        valid_upside_thresholds = {k: v for k, v in upside_thresholds.items() if k in upside_threshold_keys}
+        
+        if not valid_upside_thresholds:
+            return
+        
+        # Calculate all upside threshold prices at once
+        upside_threshold_gains = np.array([valid_upside_thresholds.get(key, 0) for key in upside_threshold_keys])
+        upside_threshold_prices = prev_close * (1 + upside_threshold_gains / 100)
+        
+        # Vectorized breach detection
+        upside_breaches = current_high > upside_threshold_prices
+        upside_breach_magnitudes = np.where(
+            upside_breaches, 
+            (current_high - upside_threshold_prices) / prev_close * 100, 
+            0
+        )
+        
+        # Update result DataFrame
+        for i, conf_pct in enumerate(conf_pcts):
+            upside_threshold_key = f'upside_threshold_{conf_pct}'
+            if upside_threshold_key in valid_upside_thresholds:
+                result.iloc[idx, result.columns.get_loc(f'upside_threshold_{conf_pct}')] = upside_threshold_prices[i]
+                result.iloc[idx, result.columns.get_loc(f'above_upside_threshold_{conf_pct}')] = int(upside_breaches[i])
+                result.iloc[idx, result.columns.get_loc(f'upside_breach_magnitude_{conf_pct}')] = upside_breach_magnitudes[i]
     
     def bootstrap_confidence_interval(self, data: np.ndarray, 
                                     statistic_func: callable,
@@ -1059,7 +1138,7 @@ class RobustOvernightAnalyzer:
         
         # Trading parameters
         self.INITIAL_CAPITAL = 25000.0
-        self.RISK_PER_TRADE_PERCENT = 2.0  # 2% risk per trade
+        self.RISK_PER_TRADE_PERCENT = 10.0  # 2% risk per trade
         self.CONFIDENCE_LEVEL_FOR_TRADING = 68  # Use 68% threshold for trading
         
     def analyze_symbol(self, symbol: str, 
@@ -1629,18 +1708,18 @@ class RobustOvernightAnalyzer:
     
     def calculate_trading_signals_and_pnl(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate trading signals and PnL for overnight hold strategy
+        Enhanced trading signals and PnL calculation with 5-day scaling strategy:
         
         Strategy:
-        - Open position at close price when conditions are met
-        - Close position when price hits the 68% threshold (or at next close if not hit)
-        - Track PnL, running equity, and trade statistics
+        1. Enter position at close
+        2. If position is open for 5 days, scale in at 5th day closing price
+        3. Exit at 1% profit from the scaled entry price
         
         Args:
             df: DataFrame with calculated metrics and thresholds
             
         Returns:
-            DataFrame with trading signals and PnL columns added
+            DataFrame with enhanced trading signals and PnL columns
         """
         result = df.copy()
         
@@ -1648,28 +1727,41 @@ class RobustOvernightAnalyzer:
         result['trade_signal'] = None
         result['position_status'] = None
         result['entry_price'] = np.nan
+        result['scaled_entry_price'] = np.nan  # New column for scaled entry
         result['exit_price'] = np.nan
         result['target_price'] = np.nan
+        result['stop_loss_price'] = np.nan
         result['pnl'] = np.nan
         result['running_pnl'] = np.nan
         result['current_equity'] = self.INITIAL_CAPITAL
         result['position_size'] = np.nan
         result['shares'] = np.nan
+        result['days_held'] = 0
+        result['exit_reason'] = None
+        result['scaled_in'] = 0  # New column to track if position was scaled
         
         # Scaling-in analysis columns
-        result['position_underwater'] = 0  # 1 if position is below entry price
-        result['scaling_opportunity'] = 0  # 1 if next day recovery potential exists while underwater
+        result['position_underwater'] = 0
+        result['scaling_opportunity'] = 0
         
         # Track current equity
         current_equity = self.INITIAL_CAPITAL
         
-        # Get the UPSIDE threshold column for trading (68% confidence level)
+        # Get threshold columns for trading
         upside_threshold_col = f'upside_threshold_{self.CONFIDENCE_LEVEL_FOR_TRADING}'
         above_upside_threshold_col = f'above_upside_threshold_{self.CONFIDENCE_LEVEL_FOR_TRADING}'
         
-        if upside_threshold_col not in result.columns or above_upside_threshold_col not in result.columns:
-            print(f"Warning: Required upside threshold columns not found for {self.CONFIDENCE_LEVEL_FOR_TRADING}% confidence level")
+        # Get stop-loss threshold column (95% confidence level for downside)
+        stop_loss_conf_pct = int(self.config.stop_loss_threshold * 100)
+        stop_loss_threshold_col = f'threshold_{stop_loss_conf_pct}'
+        
+        if upside_threshold_col not in result.columns:
+            print(f"Warning: Required upside threshold column not found: {upside_threshold_col}")
             return result
+        
+        if self.config.enable_stop_loss and stop_loss_threshold_col not in result.columns:
+            print(f"Warning: Stop-loss threshold column not found: {stop_loss_threshold_col}")
+            self.config.enable_stop_loss = False
         
         # Track open position
         open_position = None
@@ -1680,109 +1772,259 @@ class RobustOvernightAnalyzer:
             # Update current equity in the dataframe
             result.iloc[i, result.columns.get_loc('current_equity')] = current_equity
             
-            # Skip if we don't have upside threshold data yet
+            # Skip if we don't have threshold data yet
             if pd.isna(current_row[upside_threshold_col]):
                 continue
             
             # Check if we have an open position
             if open_position is not None:
-                # We have an open position, check for exit conditions
-                entry_price = open_position['entry_price']
+                # We have an open position, check for scaling and exit conditions
+                original_entry_price = open_position['entry_price']
+                current_entry_price = open_position.get('scaled_entry_price', original_entry_price)
                 target_price = open_position['target_price']
+                stop_loss_price = open_position.get('stop_loss_price', None)
                 entry_equity = open_position['entry_equity']
                 position_size = open_position['position_size']
                 shares = open_position['shares']
+                entry_date = open_position['entry_date']
+                scaled_in = open_position.get('scaled_in', False)
                 
-                # Check if high hit the target price (68% upside threshold)
                 current_high = current_row['high']
+                current_low = current_row['low']
                 current_close = current_row['close']
+                current_date = current_row['datetime']
                 
-                # Calculate running PnL
-                running_pnl = (current_close - entry_price) * shares
+                # Calculate days held
+                days_held = (current_date - entry_date).days
+                result.iloc[i, result.columns.get_loc('days_held')] = days_held
+                
+                # Update position data in result
+                result.iloc[i, result.columns.get_loc('entry_price')] = original_entry_price
+                result.iloc[i, result.columns.get_loc('scaled_entry_price')] = current_entry_price
+                result.iloc[i, result.columns.get_loc('target_price')] = target_price
+                result.iloc[i, result.columns.get_loc('scaled_in')] = int(scaled_in)
+                
+                # Calculate running PnL based on current entry price (scaled or original)
+                running_pnl = (current_close - current_entry_price) * shares
                 result.iloc[i, result.columns.get_loc('running_pnl')] = running_pnl
                 
-                # Track if position is underwater (current close < entry price)
-                if current_close < entry_price:
+                # Track if position is underwater
+                if current_close < current_entry_price:
                     result.iloc[i, result.columns.get_loc('position_underwater')] = 1
                     
-                    # Check if next day has recovery potential for scaling-in analysis
+                    # Check for scaling opportunity
                     if pd.notna(current_row.get('next_day_recovery_potential', np.nan)):
                         if current_row['next_day_recovery_potential'] == 1:
                             result.iloc[i, result.columns.get_loc('scaling_opportunity')] = 1
                 
-                # Check exit conditions - ONLY exit when upside target is hit
+                # Check for 5-day scaling condition FIRST (before exit checks)
+                if days_held == 5 and not scaled_in:
+                    # Scale in: calculate shares needed to bring weighted average within 0.02% of current close price
+                    scale_in_price = current_close
+                    original_shares = shares
+                    
+                    # Target weighted average should be within 0.02% of the 5th day closing price
+                    target_weighted_avg = scale_in_price * (1 + 0.0002)  # 0.02% above close price
+                    
+                    # Solve for additional shares needed:
+                    # target_avg = (original_shares * original_price + additional_shares * scale_price) / (original_shares + additional_shares)
+                    # Rearranging: additional_shares = original_shares * (original_price - target_avg) / (target_avg - scale_price)
+                    
+                    if abs(target_weighted_avg - scale_in_price) > 0.001:  # Avoid division by zero
+                        additional_shares_needed = original_shares * (original_entry_price - target_weighted_avg) / (target_weighted_avg - scale_in_price)
+                        
+                        # Ensure we don't buy negative shares
+                        additional_shares_needed = max(0, additional_shares_needed)
+                        
+                        # Cap additional shares to avoid excessive position size (max 10x original position for precision)
+                        max_additional_shares = original_shares * 10
+                        additional_shares = min(additional_shares_needed, max_additional_shares)
+                        
+                        # Ensure minimum purchase to make scaling worthwhile
+                        min_additional_shares = original_shares * 0.1  # At least 10% more shares
+                        if additional_shares < min_additional_shares:
+                            additional_shares = min_additional_shares
+                    else:
+                        # If already very close, buy minimal additional shares
+                        additional_shares = original_shares * 0.1
+                    
+                    additional_position_size = additional_shares * scale_in_price
+                    
+                    # Apply transaction cost for scaling in
+                    scale_in_cost = additional_position_size * self.config.transaction_cost
+                    current_equity -= scale_in_cost
+                    
+                    # Calculate actual weighted average entry price with the additional shares
+                    total_shares = original_shares + additional_shares
+                    original_position_value = original_shares * original_entry_price
+                    new_position_value = additional_shares * scale_in_price
+                    total_position_value = original_position_value + new_position_value
+                    weighted_avg_entry_price = total_position_value / total_shares
+                    
+                    # Calculate percentage difference from target close price
+                    price_diff_pct = abs(weighted_avg_entry_price - scale_in_price) / scale_in_price * 100
+                    
+                    # Calculate new target price (1% from weighted average)
+                    new_target_price = weighted_avg_entry_price * 1.01
+                    
+                    # Update position with scaled entry
+                    open_position['scaled_entry_price'] = weighted_avg_entry_price
+                    open_position['target_price'] = new_target_price
+                    open_position['shares'] = total_shares
+                    open_position['position_size'] = total_position_value
+                    open_position['scaled_in'] = True
+                    
+                    # Update result for this row
+                    result.iloc[i, result.columns.get_loc('trade_signal')] = 'SCALE_IN'
+                    result.iloc[i, result.columns.get_loc('scaled_entry_price')] = weighted_avg_entry_price
+                    result.iloc[i, result.columns.get_loc('target_price')] = new_target_price
+                    result.iloc[i, result.columns.get_loc('shares')] = total_shares
+                    result.iloc[i, result.columns.get_loc('position_size')] = total_position_value
+                    result.iloc[i, result.columns.get_loc('scaled_in')] = 1
+                    result.iloc[i, result.columns.get_loc('current_equity')] = current_equity
+                    
+                    # Update current values for exit checks
+                    current_entry_price = weighted_avg_entry_price
+                    target_price = new_target_price
+                    shares = total_shares
+                    scaled_in = True
+                    
+                    print(f"Scaled in on day {days_held}: Added {additional_shares:.2f} shares at ${scale_in_price:.2f}")
+                    print(f"  Original entry: ${original_entry_price:.2f}, 5th day close: ${scale_in_price:.2f}")
+                    print(f"  Total shares: {total_shares:.2f}, Weighted avg: ${weighted_avg_entry_price:.2f} ({price_diff_pct:.4f}% from close)")
+                    print(f"  New target: ${new_target_price:.2f}")
+                
+                # Check exit conditions in priority order
                 exit_triggered = False
                 exit_price = None
+                exit_reason = None
                 
-                if current_high >= target_price:
-                    # Upside target hit during the day - this is our only exit condition
+                # 1. Stop-loss check (highest priority) - only if enabled
+                if (self.config.enable_stop_loss and stop_loss_price is not None and 
+                    current_low <= stop_loss_price):
+                    exit_triggered = True
+                    exit_price = stop_loss_price
+                    exit_reason = 'STOP_LOSS'
+                    result.iloc[i, result.columns.get_loc('trade_signal')] = 'EXIT_STOP_LOSS'
+                
+                # 2. Target hit check (using current target price)
+                elif current_high >= target_price:
                     exit_triggered = True
                     exit_price = target_price
+                    exit_reason = 'TARGET_HIT'
                     result.iloc[i, result.columns.get_loc('trade_signal')] = 'EXIT_TARGET_HIT'
-                # Remove the automatic exit at close - hold until target is hit
+                
+                # 3. Hold period cap check (only if enabled)
+                elif self.config.enable_hold_cap and days_held >= self.config.max_hold_days:
+                    exit_triggered = True
+                    exit_price = current_close
+                    exit_reason = 'HOLD_CAP'
+                    result.iloc[i, result.columns.get_loc('trade_signal')] = 'EXIT_HOLD_CAP'
+                
+                # 4. EOD exit check (only if enabled)
+                elif (self.config.enable_eod_exit and days_held > 0 and 
+                      current_high < target_price):
+                    exit_triggered = True
+                    exit_price = current_close
+                    exit_reason = 'EOD_EXIT'
+                    result.iloc[i, result.columns.get_loc('trade_signal')] = 'EXIT_EOD'
                 
                 if exit_triggered:
-                    # Calculate PnL
-                    trade_pnl = (exit_price - entry_price) * shares
-                    current_equity += trade_pnl
+                    # Calculate PnL with transaction costs based on current entry price
+                    gross_pnl = (exit_price - current_entry_price) * shares
+                    
+                    # Apply transaction costs (entry + exit)
+                    entry_cost = position_size * self.config.transaction_cost
+                    exit_cost = (exit_price * shares) * self.config.transaction_cost
+                    total_transaction_costs = entry_cost + exit_cost
+                    
+                    net_pnl = gross_pnl - total_transaction_costs
+                    current_equity += net_pnl
                     
                     # Update result
                     result.iloc[i, result.columns.get_loc('position_status')] = 'CLOSED'
                     result.iloc[i, result.columns.get_loc('exit_price')] = exit_price
-                    result.iloc[i, result.columns.get_loc('pnl')] = trade_pnl
+                    result.iloc[i, result.columns.get_loc('pnl')] = net_pnl
                     result.iloc[i, result.columns.get_loc('current_equity')] = current_equity
+                    result.iloc[i, result.columns.get_loc('exit_reason')] = exit_reason
                     
                     # Clear open position
                     open_position = None
+                else:
+                    # Position remains open
+                    result.iloc[i, result.columns.get_loc('position_status')] = 'OPEN'
             
             else:
                 # No open position, check for entry conditions
-                # Entry condition: We have a valid upside threshold and we want to buy at close
-                # expecting the price to rise to the upside threshold (profit target)
-                
                 current_close = current_row['close']
                 upside_threshold_price = current_row[upside_threshold_col]
+                volatility_regime = current_row.get('volatility_regime', 'Normal')
                 
-                # Only enter if we have valid data and upside threshold is above current close
-                if (pd.notna(upside_threshold_price) and 
-                    pd.notna(current_close) and 
-                    upside_threshold_price > current_close):
-                    
-                    # Calculate position size (risk 2% of equity)
+                # Entry condition checks
+                entry_conditions_met = True
+                
+                # 1. Basic threshold check (still need valid threshold data for analysis)
+                if pd.isna(upside_threshold_price) or pd.isna(current_close):
+                    entry_conditions_met = False
+                
+                # 2. Regime filter check (only if enabled)
+                if (self.config.enable_regime_filter and 
+                    volatility_regime != self.config.regime_filter):
+                    entry_conditions_met = False
+                
+                if entry_conditions_met:
+                    # Calculate position size
                     risk_amount = current_equity * (self.RISK_PER_TRADE_PERCENT / 100)
+                    shares = risk_amount / current_close
+                    position_size = shares * current_close
                     
-                    # Calculate potential profit if we hit the upside threshold
-                    potential_profit_per_share = upside_threshold_price - current_close
+                    # Use fixed 1% take profit target from initial entry
+                    initial_target_price = current_close * 1.01  # 1% profit target
                     
-                    if potential_profit_per_share > 0:
-                        # Simple position sizing: use fixed dollar amount based on risk
-                        # Don't use leverage - just buy what we can afford with risk amount
-                        shares = risk_amount / current_close  # Buy shares worth the risk amount
-                        position_size = shares * current_close  # This should equal risk_amount
+                    # Calculate stop-loss price if enabled
+                    stop_loss_price = None
+                    if self.config.enable_stop_loss and stop_loss_threshold_col in result.columns:
+                        stop_loss_price = current_row[stop_loss_threshold_col]
+                        if pd.isna(stop_loss_price):
+                            # Fallback: use 95% of current close as stop-loss
+                            stop_loss_price = current_close * 0.95
+                    
+                    # Ensure position size is reasonable
+                    if position_size <= risk_amount * 1.01:  # Small buffer for rounding
+                        # Open LONG position
+                        open_position = {
+                            'entry_price': current_close,
+                            'scaled_entry_price': current_close,  # Initially same as entry price
+                            'target_price': initial_target_price,
+                            'stop_loss_price': stop_loss_price,
+                            'entry_equity': current_equity,
+                            'position_size': position_size,
+                            'shares': shares,
+                            'entry_date': current_row['datetime'],
+                            'scaled_in': False
+                        }
                         
-                        # Ensure position size doesn't exceed risk amount
-                        if position_size <= risk_amount * 1.01:  # Small buffer for rounding
-                            # Open LONG position (buy expecting price to rise to upside target)
-                            open_position = {
-                                'entry_price': current_close,
-                                'target_price': upside_threshold_price,
-                                'entry_equity': current_equity,
-                                'position_size': position_size,
-                                'shares': shares
-                            }
-                            
-                            # Update result
-                            result.iloc[i, result.columns.get_loc('trade_signal')] = 'ENTRY_LONG'
-                            result.iloc[i, result.columns.get_loc('position_status')] = 'OPEN'
-                            result.iloc[i, result.columns.get_loc('entry_price')] = current_close
-                            result.iloc[i, result.columns.get_loc('target_price')] = upside_threshold_price
-                            result.iloc[i, result.columns.get_loc('position_size')] = position_size
-                            result.iloc[i, result.columns.get_loc('shares')] = shares
+                        # Apply entry transaction cost immediately
+                        entry_cost = position_size * self.config.transaction_cost
+                        current_equity -= entry_cost
+                        
+                        # Update result
+                        result.iloc[i, result.columns.get_loc('trade_signal')] = 'ENTRY_LONG'
+                        result.iloc[i, result.columns.get_loc('position_status')] = 'OPEN'
+                        result.iloc[i, result.columns.get_loc('entry_price')] = current_close
+                        result.iloc[i, result.columns.get_loc('scaled_entry_price')] = current_close
+                        result.iloc[i, result.columns.get_loc('target_price')] = initial_target_price
+                        result.iloc[i, result.columns.get_loc('stop_loss_price')] = stop_loss_price
+                        result.iloc[i, result.columns.get_loc('position_size')] = position_size
+                        result.iloc[i, result.columns.get_loc('shares')] = shares
+                        result.iloc[i, result.columns.get_loc('current_equity')] = current_equity
+                        result.iloc[i, result.columns.get_loc('days_held')] = 0
+                        result.iloc[i, result.columns.get_loc('scaled_in')] = 0
         
         return result
     
     def calculate_performance_summary(self, df: pd.DataFrame, symbol: str) -> Dict[str, Any]:
-        """Calculate and return performance summary from trading data"""
+        """Calculate and return performance summary from trading data with 5-day scaling analysis"""
         try:
             # Filter for completed trades (rows with PnL values)
             trades = df[df['pnl'].notna() & (df['pnl'] != 0)]
@@ -1803,6 +2045,22 @@ class RobustOvernightAnalyzer:
             winning_trades = len(trades[trades['pnl'] > 0])
             losing_trades = len(trades[trades['pnl'] < 0])
             breakeven_trades = len(trades[trades['pnl'] == 0])
+            
+            # 5-Day Scaling Strategy Analysis
+            scaled_trades = trades[trades['scaled_in'] == 1]
+            non_scaled_trades = trades[trades['scaled_in'] == 0]
+            
+            scaling_stats = {
+                'total_scaled_trades': len(scaled_trades),
+                'total_non_scaled_trades': len(non_scaled_trades),
+                'scaling_rate': (len(scaled_trades) / total_trades * 100) if total_trades > 0 else 0,
+                'scaled_win_rate': (len(scaled_trades[scaled_trades['pnl'] > 0]) / len(scaled_trades) * 100) if len(scaled_trades) > 0 else 0,
+                'non_scaled_win_rate': (len(non_scaled_trades[non_scaled_trades['pnl'] > 0]) / len(non_scaled_trades) * 100) if len(non_scaled_trades) > 0 else 0,
+                'avg_scaled_pnl': scaled_trades['pnl'].mean() if len(scaled_trades) > 0 else 0,
+                'avg_non_scaled_pnl': non_scaled_trades['pnl'].mean() if len(non_scaled_trades) > 0 else 0,
+                'scaled_total_pnl': scaled_trades['pnl'].sum() if len(scaled_trades) > 0 else 0,
+                'non_scaled_total_pnl': non_scaled_trades['pnl'].sum() if len(non_scaled_trades) > 0 else 0
+            }
             
             # PnL calculations
             total_pnl = trades['pnl'].sum()
@@ -1841,6 +2099,7 @@ class RobustOvernightAnalyzer:
             underwater_days = (df['position_underwater'] == 1).sum()
             scaling_opportunities = (df['scaling_opportunity'] == 1).sum()
             total_position_days = (df['position_status'] == 'OPEN').sum()
+            scale_in_signals = (df['trade_signal'] == 'SCALE_IN').sum()
             
             scaling_metrics = {
                 'total_position_days': total_position_days,
@@ -1848,7 +2107,9 @@ class RobustOvernightAnalyzer:
                 'underwater_percentage': (underwater_days / total_position_days * 100) if total_position_days > 0 else 0,
                 'scaling_opportunities': scaling_opportunities,
                 'scaling_opportunity_rate': (scaling_opportunities / underwater_days * 100) if underwater_days > 0 else 0,
-                'next_day_recovery_potential': df['next_day_recovery_potential'].sum()
+                'next_day_recovery_potential': df['next_day_recovery_potential'].sum(),
+                'scale_in_signals': scale_in_signals,
+                'actual_scaling_rate': (scale_in_signals / total_trades * 100) if total_trades > 0 else 0
             }
             
             return {
@@ -1872,7 +2133,8 @@ class RobustOvernightAnalyzer:
                 'max_drawdown': max_drawdown,
                 'max_drawdown_pct': max_drawdown_pct,
                 'confidence_level_used': self.CONFIDENCE_LEVEL_FOR_TRADING,
-                'scaling_analysis': scaling_metrics
+                'scaling_analysis': scaling_metrics,
+                'five_day_scaling_stats': scaling_stats
             }
             
         except Exception as e:
@@ -1917,6 +2179,34 @@ class RobustOvernightAnalyzer:
         print(f"   Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
         print(f"   Maximum Drawdown: ${performance['max_drawdown']:.2f} ({performance['max_drawdown_pct']:.2f}%)")
         
+        # 5-Day Scaling Strategy Analysis
+        if 'five_day_scaling_stats' in performance:
+            scaling_stats = performance['five_day_scaling_stats']
+            print(f"\n🎯 5-DAY SCALING STRATEGY ANALYSIS")
+            print(f"   Total Trades: {performance['total_trades']}")
+            print(f"   Scaled Trades (5+ days): {scaling_stats['total_scaled_trades']}")
+            print(f"   Non-Scaled Trades (<5 days): {scaling_stats['total_non_scaled_trades']}")
+            print(f"   Scaling Rate: {scaling_stats['scaling_rate']:.1f}%")
+            print(f"   ")
+            print(f"   📊 Performance Comparison:")
+            print(f"   Scaled Trade Win Rate: {scaling_stats['scaled_win_rate']:.1f}%")
+            print(f"   Non-Scaled Trade Win Rate: {scaling_stats['non_scaled_win_rate']:.1f}%")
+            print(f"   Average Scaled PnL: ${scaling_stats['avg_scaled_pnl']:.2f}")
+            print(f"   Average Non-Scaled PnL: ${scaling_stats['avg_non_scaled_pnl']:.2f}")
+            print(f"   Total Scaled PnL: ${scaling_stats['scaled_total_pnl']:.2f}")
+            print(f"   Total Non-Scaled PnL: ${scaling_stats['non_scaled_total_pnl']:.2f}")
+            
+            # Strategy effectiveness insights
+            if scaling_stats['scaled_win_rate'] > scaling_stats['non_scaled_win_rate']:
+                print(f"   ✅ Scaling strategy improves win rate by {scaling_stats['scaled_win_rate'] - scaling_stats['non_scaled_win_rate']:.1f} percentage points")
+            else:
+                print(f"   ⚠️  Scaling strategy reduces win rate by {scaling_stats['non_scaled_win_rate'] - scaling_stats['scaled_win_rate']:.1f} percentage points")
+            
+            if scaling_stats['avg_scaled_pnl'] > scaling_stats['avg_non_scaled_pnl']:
+                print(f"   ✅ Scaled trades generate ${scaling_stats['avg_scaled_pnl'] - scaling_stats['avg_non_scaled_pnl']:.2f} more profit per trade on average")
+            else:
+                print(f"   ❌ Scaled trades generate ${scaling_stats['avg_non_scaled_pnl'] - scaling_stats['avg_scaled_pnl']:.2f} less profit per trade on average")
+
         # Scaling-in analysis section
         if 'scaling_analysis' in performance:
             scaling = performance['scaling_analysis']
@@ -1927,6 +2217,8 @@ class RobustOvernightAnalyzer:
             print(f"   Scaling Opportunities: {scaling['scaling_opportunities']}")
             print(f"   Scaling Opportunity Rate: {scaling['scaling_opportunity_rate']:.1f}%")
             print(f"   Next Day Recovery Potential: {scaling['next_day_recovery_potential']}")
+            print(f"   Actual Scale-In Signals: {scaling['scale_in_signals']}")
+            print(f"   Actual Scaling Rate: {scaling['actual_scaling_rate']:.1f}%")
             
             # Scaling-in insights
             if scaling['scaling_opportunity_rate'] > 60:
@@ -2030,9 +2322,7 @@ class RobustOvernightAnalyzer:
             numeric_columns = csv_data.select_dtypes(include=[np.number]).columns
             csv_data[numeric_columns] = csv_data[numeric_columns].round(6)
             
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'historical_data/{symbol}_overnight_hold_backtest_with_thresholds_{timestamp}.csv'
+            filename = f'historical_data/{symbol}_overnight_hold_backtest_with_thresholds.csv'
             
             # Save to CSV
             csv_data.to_csv(filename, index=False)
@@ -2069,14 +2359,13 @@ class RobustOvernightAnalyzer:
             visualizer = MidnightMomentumVisualizer(csv_filename)
             
             # Generate comprehensive visualization
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            comprehensive_chart_path = f'charts/{symbol}_overnight_hold_comprehensive_{timestamp}.png'
+            comprehensive_chart_path = f'charts/{symbol}_overnight_hold_comprehensive.png'
             
             print(f"   📊 Creating comprehensive visualization...")
             visualizer.create_comprehensive_visualization(save_path=comprehensive_chart_path)
             
             # Generate simple visualization
-            simple_chart_path = f'charts/{symbol}_overnight_hold_simple_{timestamp}.png'
+            simple_chart_path = f'charts/{symbol}_overnight_hold_simple.png'
             
             print(f"   📈 Creating simple visualization...")
             visualizer.create_simple_chart(save_path=simple_chart_path)
